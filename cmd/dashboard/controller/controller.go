@@ -151,6 +151,12 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 
 	auth.PATCH("/setting", adminHandler(updateConfig))
 
+	auth.GET("/domains", commonHandler(GetDomainList))
+	auth.POST("/domains", commonHandler(AddDomain))
+	auth.POST("/domains/:id/verify", commonHandler(VerifyDomain))
+	auth.PUT("/domains/:id", commonHandler(UpdateDomain))
+	auth.DELETE("/domains/:id", commonHandler(DeleteDomain))
+
 	r.NoRoute(fallbackToFrontend(frontendDist))
 }
 

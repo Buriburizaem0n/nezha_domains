@@ -12,9 +12,6 @@
 			"installDockerComposeSwitch": true,
 			"version": "latest",
 			"dockerDashComposeVersion": "latest"
-		},
-		"ghcr.io/devcontainers/features/go:1": {
-			"version": "1.24.0"
 		}
 	},
 

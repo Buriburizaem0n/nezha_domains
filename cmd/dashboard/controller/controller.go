@@ -75,6 +75,7 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	optionalAuth.GET("/service", commonHandler(showService))
 	optionalAuth.GET("/service/:id", commonHandler(listServiceHistory))
 	optionalAuth.GET("/service/server", commonHandler(listServerWithServices))
+	optionalAuth.GET("/domains", commonHandler(GetDomainList))
 
 	auth := api.Group("", authMw)
 
@@ -151,7 +152,6 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 
 	auth.PATCH("/setting", adminHandler(updateConfig))
 
-	auth.GET("/domains", commonHandler(GetDomainList))
 	auth.POST("/domains", commonHandler(AddDomain))
 	auth.POST("/domains/:id/verify", commonHandler(VerifyDomain))
 	auth.PUT("/domains/:id", commonHandler(UpdateDomain))

@@ -1,33 +1,24 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/go
 {
-	"name": "NeZha",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "mcr.microsoft.com/devcontainers/go:1-1.24-bookworm",
+    "name": "NeZha",
+    "image": "mcr.microsoft.com/devcontainers/go:1-1.24-bookworm",
 
-	// Features to add to the dev container. More info: https://containers.dev/features.
-	"features": {
-		"ghcr.io/devcontainers/features/docker-in-docker:2": {
-			"installDockerBuildx": true,
-			"installDockerComposeSwitch": true,
-			"version": "latest",
-			"dockerDashComposeVersion": "latest"
-		}
-	},
+    "features": {},
 
-	// Use 'forwardPorts' to make a list of ports inside the container available locally.
-	// "forwardPorts": [],
+    // 开启 TUN 后不需要 GOPROXY 也能跑，但保留国内源也没坏处
+    "containerEnv": {
+        "GOPROXY": "https://goproxy.cn,direct",
+        "GOSUMDB": "sum.golang.google.cn"
+    },
 
-	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": {
-		"Init": "sudo apt update && sudo apt install -y protobuf-compiler && go install github.com/swaggo/swag/cmd/swag@latest && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest && go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq && touch ./cmd/dashboard/user-dist/a && touch ./cmd/dashboard/admin-dist/a && script/bootstrap.sh && script/fetch-frontends.sh",
-		"Init_build": "wget https://github.com/goreleaser/goreleaser/releases/download/v2.7.0/goreleaser_2.7.0_amd64.deb && sudo apt install -y ./goreleaser_2.7.0_amd64.deb && rm -rf ./goreleaser_2.7.0_amd64.deb && sudo apt install -y gcc-aarch64-linux-gnu gcc-s390x-linux-gnu mingw-w64",
-		"Init_DiD_Buildx": "docker buildx create --name nezha-builder --platform linux/amd64,linux/amd64/v2,linux/amd64/v3,linux/386,linux/arm64,linux/arm/v7,linux/s390x && docker buildx use nezha-builder && docker buildx inspect --bootstrap"
-	}
-
-	// Configure tool-specific properties.
-	// "customizations": {},
-
-	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
-	// "remoteUser": "root"
+    "postCreateCommand": {
+        // 【关键修改】
+        // 删除了: rm -rf ../agent/proto && cp -r proto ../agent
+        // 保留了: swagger init, protoc 生成 dashboard 代码, wget 下载工具
+        // 这些命令只在当前目录下操作，绝对安全。
+        "Init": "sudo apt update && sudo apt install -y protobuf-compiler && go install github.com/swaggo/swag/cmd/swag@latest && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest && go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && swag init --pd -d . -g ./cmd/dashboard/main.go -o ./cmd/dashboard/docs --requiredByDefault && protoc --go-grpc_out=\"require_unimplemented_servers=false:.\" --go_out=\".\" proto/*.proto && sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq && touch ./cmd/dashboard/user-dist/a && touch ./cmd/dashboard/admin-dist/a && script/bootstrap.sh && script/fetch-frontends.sh",
+        
+        "Init_build": "wget https://github.com/goreleaser/goreleaser/releases/download/v2.7.0/goreleaser_2.7.0_amd64.deb && sudo apt install -y ./goreleaser_2.7.0_amd64.deb && rm -rf ./goreleaser_2.7.0_amd64.deb && sudo apt install -y gcc-aarch64-linux-gnu gcc-s390x-linux-gnu mingw-w64"
+    }
 }

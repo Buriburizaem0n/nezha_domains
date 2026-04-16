@@ -66,7 +66,8 @@ func oauth2redirect(c *gin.Context) (*model.Oauth2LoginResponse, error) {
 	}, cache.DefaultExpiration)
 
 	url := o2conf.AuthCodeURL(state, oauth2.AccessTypeOnline)
-	c.SetCookie("nz-o2s", stateKey, 60*5, "", "", false, false)
+	// CodeQL go/cookie-secure-not-set: 根据请求协议动态设置 Secure 属性，避免 HTTP 环境下 Cookie 无法使用
+	c.SetCookie("nz-o2s", stateKey, 60*5, "", "", c.Request.URL.Scheme == "https" || c.Request.TLS != nil, false)
 
 	return &model.Oauth2LoginResponse{Redirect: url}, nil
 }
@@ -177,7 +178,10 @@ func oauth2callback(jwtConfig *jwt.GinJWTMiddleware) func(c *gin.Context) (any, 
 			}
 		}
 
-		tokenString, _, err := jwtConfig.TokenGenerator(fmt.Sprintf("%d", bind.UserID))
+		tokenString, _, err := jwtConfig.TokenGenerator(map[string]interface{}{
+			"user_id": fmt.Sprintf("%d", bind.UserID),
+			"ip":      realip,
+		})
 		if err != nil {
 			return nil, err
 		}

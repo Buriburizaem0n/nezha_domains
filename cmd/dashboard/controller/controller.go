@@ -73,9 +73,11 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	optionalAuth.GET("/server-group", commonHandler(listServerGroup))
 
 	optionalAuth.GET("/service", commonHandler(showService))
-	optionalAuth.GET("/service/:id", commonHandler(listServiceHistory))
 	optionalAuth.GET("/service/server", commonHandler(listServerWithServices))
 	optionalAuth.GET("/domains", commonHandler(GetDomainList))
+	optionalAuth.GET("/service/:id/history", commonHandler(getServiceHistory))
+	optionalAuth.GET("/server/:id/service", commonHandler(listServerServices))
+	optionalAuth.GET("/server/:id/metrics", commonHandler(getServerMetrics))
 
 	auth := api.Group("", authMw)
 
@@ -151,6 +153,7 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	auth.POST("/online-user/batch-block", adminHandler(batchBlockOnlineUser))
 
 	auth.PATCH("/setting", adminHandler(updateConfig))
+	auth.POST("/maintenance", adminHandler(runMaintenance))
 
 	auth.POST("/domains", commonHandler(AddDomain))
 	auth.POST("/domains/:id/verify", commonHandler(VerifyDomain))

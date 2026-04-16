@@ -155,6 +155,7 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 
 	auth.POST("/domains", commonHandler(AddDomain))
 	auth.POST("/domains/:id/verify", commonHandler(VerifyDomain))
+	auth.POST("/domains/:id/sync", commonHandler(SyncDomainWHOIS))
 	auth.PUT("/domains/:id", commonHandler(UpdateDomain))
 	auth.DELETE("/domains/:id", commonHandler(DeleteDomain))
 

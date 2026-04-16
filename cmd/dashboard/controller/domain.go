@@ -118,3 +118,21 @@ func UpdateDomainInfo(c *gin.Context) (any, error) {
 
 	return singleton.UpdateDomain(domainID, req)
 }
+
+func SyncDomainWHOIS(c *gin.Context) (any, error) {
+	domainID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		return nil, newGormError("无效的域名ID")
+	}
+
+	domain, err := singleton.GetDomainByID(domainID)
+	if err != nil {
+		return nil, newGormError("未找到域名: %s", err.Error())
+	}
+
+	if err := singleton.SyncDomainWHOIS(domain); err != nil {
+		return nil, newGormError("Whois 同步失败: %s", err.Error())
+	}
+
+	return domain, nil
+}

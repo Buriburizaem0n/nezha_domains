@@ -14,7 +14,48 @@ import (
 
 	"github.com/nezhahq/nezha/model"
 	"gorm.io/datatypes"
+
+	whois "github.com/likexian/whois"
+	whoisparser "github.com/likexian/whois-parser"
 )
+
+
+// SyncDomainWHOIS 从 Whois 获取域名信息并同步到 BillingData
+func SyncDomainWHOIS(d *model.Domain) error {
+	raw, err := whois.Whois(d.Domain)
+	if err != nil {
+		return fmt.Errorf("Whois查询失败: %w", err)
+	}
+
+	result, err := whoisparser.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("Whois解析失败: %w", err)
+	}
+
+	var billing model.BillingDataMod
+	if d.BillingData != nil && len(d.BillingData) > 0 {
+		json.Unmarshal(d.BillingData, &billing)
+	}
+
+	// 填充信息
+	if result.Registrar.Name != "" {
+		billing.Registrar = result.Registrar.Name
+	}
+	if result.Domain.ExpirationDate != "" {
+		billing.EndDate = result.Domain.ExpirationDate
+	}
+	if result.Domain.CreatedDate != "" {
+		billing.RegisteredDate = result.Domain.CreatedDate
+	}
+
+	newBillingData, err := json.Marshal(billing)
+	if err != nil {
+		return err
+	}
+
+	d.BillingData = newBillingData
+	return DB.Save(d).Error
+}
 
 // GetDomains 获取所有域名记录
 func GetDomains(scope string) ([]model.Domain, error) {
@@ -81,11 +122,21 @@ func VerifyDomain(id uint64) (bool, error) {
 		return false, fmt.Errorf("DNS查询失败: %w", err)
 	}
 
+	found := false
 	for _, record := range txtRecords {
 		if record == domain.VerifyToken {
 			domain.Status = "verified"
-			return true, DB.Save(domain).Error
+			found = true
+			break
 		}
+	}
+
+	if found {
+		// 自动同步 Whois 信息
+		if err := SyncDomainWHOIS(domain); err != nil {
+			log.Printf("NEZHA>> 域名 %s 验证成功但 Whois 同步失败: %v", domain.Domain, err)
+		}
+		return true, DB.Save(domain).Error
 	}
 
 	return false, nil

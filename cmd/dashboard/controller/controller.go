@@ -83,8 +83,6 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 
 	auth.GET("/refresh-token", authMiddleware.RefreshHandler)
 
-	auth.POST("/terminal", commonHandler(createTerminal))
-	auth.GET("/ws/terminal/:id", commonHandler(terminalStream))
 
 	auth.GET("/file", commonHandler(createFM))
 	auth.GET("/ws/file/:id", commonHandler(fmStream))

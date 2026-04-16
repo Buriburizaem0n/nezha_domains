@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -19,6 +20,78 @@ import (
 	whoisparser "github.com/likexian/whois-parser"
 )
 
+
+// SyncDomainPrice 从 哪煮米(nazhumi.com) 获取域名续费价格
+func SyncDomainPrice(billing *model.BillingDataMod, domainName string) {
+	// 获取 TLD
+	parts := strings.Split(domainName, ".")
+	if len(parts) < 2 {
+		return
+	}
+	tld := parts[len(parts)-1]
+
+	// 匹配注册商代码 (简单启示式匹配)
+	registrarCode := ""
+	regNameLower := strings.ToLower(billing.Registrar)
+	
+	// 这里可以扩展更多的映射关系
+	mapping := map[string]string{
+		"aliyun": "aliyun", "tencent": "tencent", "cloudflare": "cloudflare",
+		"namesilo": "namesilo", "porkbun": "porkbun", "dynadot": "dynadot",
+		"google": "google", "namecheap": "namecheap", "godaddy": "godaddy",
+		"spaceship": "spaceship", "huawei": "huawei", "baidu": "baidu",
+		"volcengine": "volcengine", "juming": "juming", "quyu": "quyu",
+		"west": "west", "xinnet": "xinnet", "ename": "ename",
+	}
+
+	for key, code := range mapping {
+		if strings.Contains(regNameLower, key) {
+			registrarCode = code
+			break
+		}
+	}
+
+	if registrarCode == "" {
+		// 备选方案：去除常用后缀和空格
+		registrarCode = strings.ReplaceAll(regNameLower, " ", "")
+		registrarCode = strings.ReplaceAll(registrarCode, "inc", "")
+		registrarCode = strings.ReplaceAll(registrarCode, "llc", "")
+		registrarCode = strings.ReplaceAll(registrarCode, ".", "")
+		registrarCode = strings.ReplaceAll(registrarCode, ",", "")
+	}
+
+	apiURL := fmt.Sprintf("https://www.nazhumi.com/api/v1?registrar=%s&domain=%s", registrarCode, tld)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var results []struct {
+		Renew    interface{} `json:"renew"`
+		Currency string      `json:"currency"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil || len(results) == 0 {
+		return
+	}
+
+	// 转换价格
+	res := results[0]
+	priceStr := ""
+	switch v := res.Renew.(type) {
+	case float64:
+		priceStr = fmt.Sprintf("%.2f", v)
+	case string:
+		if v != "n/a" {
+			priceStr = v
+		}
+	}
+
+	if priceStr != "" {
+		billing.RenewalPrice = fmt.Sprintf("%s %s", priceStr, res.Currency)
+	}
+}
 
 // SyncDomainWHOIS 从 Whois 获取域名信息并同步到 BillingData
 func SyncDomainWHOIS(d *model.Domain) error {
@@ -37,7 +110,7 @@ func SyncDomainWHOIS(d *model.Domain) error {
 		json.Unmarshal(d.BillingData, &billing)
 	}
 
-	// 填充信息
+	// 填充 Whois 信息
 	if result.Registrar.Name != "" {
 		billing.Registrar = result.Registrar.Name
 	}
@@ -47,6 +120,9 @@ func SyncDomainWHOIS(d *model.Domain) error {
 	if result.Domain.CreatedDate != "" {
 		billing.RegisteredDate = result.Domain.CreatedDate
 	}
+
+	// 补充价格同步
+	SyncDomainPrice(&billing, d.Domain)
 
 	newBillingData, err := json.Marshal(billing)
 	if err != nil {

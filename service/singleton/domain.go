@@ -163,13 +163,11 @@ func CronJobForDomainStatus() {
 		// 只有在到期前一定天数通知，且避开重复通知 (简单逻辑：每天通知一次)
 		if Conf.ExpiryNotificationGroupID != 0 {
 			msg := ""
-			switch daysLeft {
-			case 7, 3, 1:
-				msg = fmt.Sprintf("域名 [%s] 即将到期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft, endDate.Format("2006-01-02"))
+			switch daysLeft + 1 {
+			case 60, 30, 15, 7, 3, 1:
+				msg = fmt.Sprintf("域名 [%s] 即将到期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft+1, endDate.Format("2006-01-02"))
 			case 0:
-				if now.After(endDate) {
-					msg = fmt.Sprintf("域名 [%s] 已到期！到期时间: %s", d.Domain, endDate.Format("2006-01-02"))
-				}
+				msg = fmt.Sprintf("域名 [%s] 已到期！到期时间: %s", d.Domain, endDate.Format("2006-01-02"))
 			}
 			if msg != "" {
 				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-domain-%d-%d", d.ID, daysLeft))
@@ -246,13 +244,11 @@ func CronJobForServerStatus() {
 
 		if Conf.ExpiryNotificationGroupID != 0 {
 			msg := ""
-			switch daysLeft {
-			case 15, 7, 3, 1:
-				msg = fmt.Sprintf("VPS [%s] 即将到期，剩余 %d 天。到期时间: %s", s.Name, daysLeft, endDate.Format("2006-01-02"))
+			switch daysLeft + 1 {
+			case 30, 15, 7, 3, 1:
+				msg = fmt.Sprintf("VPS [%s] 即将到期，剩余 %d 天。到期时间: %s", s.Name, daysLeft+1, endDate.Format("2006-01-02"))
 			case 0:
-				if now.After(endDate) {
-					msg = fmt.Sprintf("VPS [%s] 已到期！到期时间: %s", s.Name, endDate.Format("2006-01-02"))
-				}
+				msg = fmt.Sprintf("VPS [%s] 已到期！到期时间: %s", s.Name, endDate.Format("2006-01-02"))
 			}
 			if msg != "" {
 				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-server-%d-%d", s.ID, daysLeft))

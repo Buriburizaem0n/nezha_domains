@@ -158,6 +158,24 @@ func CronJobForDomainStatus() {
 			continue
 		}
 
+		daysLeft := int(endDate.Sub(now).Hours() / 24)
+
+		// 只有在到期前一定天数通知，且避开重复通知 (简单逻辑：每天通知一次)
+		if Conf.ExpiryNotificationGroupID != 0 {
+			msg := ""
+			switch daysLeft {
+			case 7, 3, 1:
+				msg = fmt.Sprintf("域名 [%s] 即将到期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft, endDate.Format("2006-01-02"))
+			case 0:
+				if now.After(endDate) {
+					msg = fmt.Sprintf("域名 [%s] 已到期！到期时间: %s", d.Domain, endDate.Format("2006-01-02"))
+				}
+			}
+			if msg != "" {
+				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-domain-%d-%d", d.ID, daysLeft))
+			}
+		}
+
 		if now.After(endDate) {
 			if billing.AutoRenewal == "1" {
 				var newEndDate time.Time
@@ -191,4 +209,55 @@ func CronJobForDomainStatus() {
 		}
 	}
 	log.Println("NEZHA>> Cron::域名状态检查任务执行完毕")
+}
+
+// CronJobForServerStatus 检查服务器/VPS 到期通知
+func CronJobForServerStatus() {
+	log.Println("NEZHA>> Cron::开始执行服务器到期检查任务")
+	var servers []model.Server
+	if err := DB.Find(&servers).Error; err != nil {
+		log.Printf("NEZHA>> Cron::Error fetching servers: %v", err)
+		return
+	}
+
+	now := time.Now()
+
+	for i := range servers {
+		s := servers[i]
+		if s.BillingData == nil {
+			continue
+		}
+
+		var billing model.BillingDataMod
+		if err := json.Unmarshal(s.BillingData, &billing); err != nil {
+			continue
+		}
+
+		if billing.EndDate == "" {
+			continue
+		}
+
+		endDate, err := time.Parse(time.RFC3339, billing.EndDate)
+		if err != nil {
+			continue
+		}
+
+		daysLeft := int(endDate.Sub(now).Hours() / 24)
+
+		if Conf.ExpiryNotificationGroupID != 0 {
+			msg := ""
+			switch daysLeft {
+			case 15, 7, 3, 1:
+				msg = fmt.Sprintf("VPS [%s] 即将到期，剩余 %d 天。到期时间: %s", s.Name, daysLeft, endDate.Format("2006-01-02"))
+			case 0:
+				if now.After(endDate) {
+					msg = fmt.Sprintf("VPS [%s] 已到期！到期时间: %s", s.Name, endDate.Format("2006-01-02"))
+				}
+			}
+			if msg != "" {
+				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-server-%d-%d", s.ID, daysLeft))
+			}
+		}
+	}
+	log.Println("NEZHA>> Cron::服务器到期检查任务执行完毕")
 }

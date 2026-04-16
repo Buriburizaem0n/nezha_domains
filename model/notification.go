@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"strings"
 	"time"
@@ -31,14 +32,21 @@ type NotificationServerBundle struct {
 	Loc          *time.Location
 }
 
+const (
+	_ = iota
+	NotificationTypeWebhook
+	NotificationTypeSMTP
+)
+
 type Notification struct {
 	Common
 	Name              string `json:"name"`
-	URL               string `json:"url"`
+	Type              uint8  `json:"type"` // 0: Webhook, 1: SMTP
+	URL               string `json:"url"`  // SMTP: host:port, Webhook: url
 	RequestMethod     uint8  `json:"request_method"`
 	RequestType       uint8  `json:"request_type"`
-	RequestHeader     string `json:"request_header" gorm:"type:longtext"`
-	RequestBody       string `json:"request_body" gorm:"type:longtext"`
+	RequestHeader     string `json:"request_header" gorm:"type:longtext"` // SMTP: user, Webhook: header
+	RequestBody       string `json:"request_body" gorm:"type:longtext"`   // SMTP: pass, Webhook: body
 	VerifyTLS         *bool  `json:"verify_tls,omitempty"`
 	FormatMetricUnits *bool  `json:"format_metric_units,omitempty"`
 }
@@ -111,8 +119,12 @@ func (n *Notification) setRequestHeader(req *http.Request) error {
 }
 
 func (ns *NotificationServerBundle) Send(message string) error {
-	var client *http.Client
 	n := ns.Notification
+	if n.Type == NotificationTypeSMTP {
+		return ns.sendSMTP(message)
+	}
+
+	var client *http.Client
 	if n.VerifyTLS != nil && *n.VerifyTLS {
 		client = utils.HttpClient
 	} else {
@@ -155,6 +167,40 @@ func (ns *NotificationServerBundle) Send(message string) error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 	}
 
+	return nil
+}
+
+func (ns *NotificationServerBundle) sendSMTP(message string) error {
+	n := ns.Notification
+	// RequestHeader: user:pass
+	// RequestBody: to_email
+	// URL: host:port
+	authInfo := strings.SplitN(n.RequestHeader, ":", 2)
+	if len(authInfo) < 2 {
+		return errors.New("SMTP认证信息格式错误 (user:pass)")
+	}
+	user := authInfo[0]
+	pass := authInfo[1]
+	to := n.RequestBody
+
+	hp := strings.SplitN(n.URL, ":", 2)
+	if len(hp) < 2 {
+		return errors.New("SMTP服务器地址格式错误 (host:port)")
+	}
+
+	auth := smtp.PlainAuth("", user, pass, hp[0])
+
+	subject := "Nezha Monitoring Alert"
+	if ns.Server != nil {
+		subject = fmt.Sprintf("Nezha Alert: %s", ns.Server.Name)
+	}
+
+	body := fmt.Sprintf("To: %s\r\nSubject: %s\r\n\r\n%s", to, subject, message)
+
+	err := smtp.SendMail(n.URL, auth, user, []string{to}, []byte(body))
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

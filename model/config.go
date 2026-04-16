@@ -42,7 +42,8 @@ type ConfigDashboard struct {
 	UserTemplate      string `koanf:"user_template" json:"user_template,omitempty"`
 	AdminTemplate     string `koanf:"admin_template" json:"admin_template,omitempty"`
 
-	EnablePlainIPInNotification bool `koanf:"enable_plain_ip_in_notification" json:"enable_plain_ip_in_notification,omitempty"` // 通知信息IP不打码
+	EnablePlainIPInNotification bool   `koanf:"enable_plain_ip_in_notification" json:"enable_plain_ip_in_notification,omitempty"` // 通知信息IP不打码
+	ExpiryNotificationGroupID   uint64 `koanf:"expiry_notification_group_id" json:"expiry_notification_group_id"`
 
 	// IP变更提醒
 	EnableIPChangeNotification  bool   `koanf:"enable_ip_change_notification" json:"enable_ip_change_notification,omitempty"`

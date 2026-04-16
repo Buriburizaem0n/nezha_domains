@@ -75,6 +75,15 @@ func initSystem(bus chan<- *model.Service) error {
 	if _, err := singleton.CronShared.AddFunc("0 0 * * * *", func() { singleton.RecordTransferHourlyUsage() }); err != nil {
 		return err
 	}
+
+	// 每天 12:00 检查域名与服务器到期
+	if _, err := singleton.CronShared.AddFunc("0 0 12 * * *", func() {
+		singleton.CronJobForDomainStatus()
+		singleton.CronJobForServerStatus()
+	}); err != nil {
+		return err
+	}
+
 	return nil
 }
 

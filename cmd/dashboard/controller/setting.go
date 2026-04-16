@@ -99,6 +99,7 @@ func updateConfig(c *gin.Context) (any, error) {
 	singleton.Conf.InstallHost = sf.InstallHost
 	singleton.Conf.IgnoredIPNotification = sf.IgnoredIPNotification
 	singleton.Conf.IPChangeNotificationGroupID = sf.IPChangeNotificationGroupID
+	singleton.Conf.ExpiryNotificationGroupID = sf.ExpiryNotificationGroupID
 	singleton.Conf.SiteName = sf.SiteName
 	singleton.Conf.DNSServers = sf.DNSServers
 	singleton.Conf.CustomCode = sf.CustomCode

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
 	pb "github.com/nezhahq/nezha/proto"
@@ -21,6 +22,7 @@ type Server struct {
 	DisplayIndex           int    `json:"display_index"`            // 展示排序，越大越靠前
 	HideForGuest           bool   `json:"hide_for_guest,omitempty"` // 对游客隐藏
 	EnableDDNS             bool   `json:"enable_ddns,omitempty"`    // 启用DDNS
+	BillingData            datatypes.JSON `gorm:"type:json" json:"billing_data,omitempty"`
 	DDNSProfilesRaw        string `gorm:"default:'[]';column:ddns_profiles_raw" json:"-"`
 	OverrideDDNSDomainsRaw string `gorm:"default:'{}';column:override_ddns_domains_raw" json:"-"`
 

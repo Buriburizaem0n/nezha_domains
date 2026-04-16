@@ -93,36 +93,88 @@ func SyncDomainPrice(billing *model.BillingDataMod, domainName string) {
 	}
 }
 
-// SyncDomainWHOIS 从 Whois 获取域名信息并同步到 BillingData
+// RDAPResponse 简化的 RDAP 响应结构
+type RDAPResponse struct {
+	Events []struct {
+		EventAction string `json:"eventAction"`
+		EventDate   string `json:"eventDate"`
+	} `json:"events"`
+	Entities []struct {
+		Roles      []string      `json:"roles"`
+		VcardArray []interface{} `json:"vcardArray"`
+	} `json:"entities"`
+}
+
+// SyncDomainWHOIS 使用 RDAP (主要) 和 Whois (备用) 同步域名信息
 func SyncDomainWHOIS(d *model.Domain) error {
 	var billing model.BillingDataMod
 	if d.BillingData != nil && len(d.BillingData) > 0 {
 		json.Unmarshal(d.BillingData, &billing)
 	}
 
-	whoisErr := error(nil)
-	raw, err := whois.Whois(d.Domain)
-	if err != nil {
-		whoisErr = fmt.Errorf("Whois查询失败: %w", err)
-	} else {
-		result, err := whoisparser.Parse(raw)
-		if err != nil {
-			whoisErr = fmt.Errorf("Whois解析失败: %w", err)
-		} else {
-			// 填充 Whois 信息
-			if result.Registrar.Name != "" {
-				billing.Registrar = result.Registrar.Name
+	// 1. 尝试使用官方 RDAP 协议 (JSON格式，更可靠，无需解析正则)
+	rdapSuccess := false
+	apiURL := fmt.Sprintf("https://rdap.org/domain/%s", d.Domain)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		var rdap RDAPResponse
+		if err := json.NewDecoder(resp.Body).Decode(&rdap); err == nil {
+			rdapSuccess = true
+			for _, event := range rdap.Events {
+				switch event.EventAction {
+				case "expiration":
+					billing.EndDate = event.EventDate
+				case "registration":
+					billing.RegisteredDate = event.EventDate
+				}
 			}
-			if result.Domain.ExpirationDate != "" {
-				billing.EndDate = result.Domain.ExpirationDate
+			// 提取注册商
+			for _, entity := range rdap.Entities {
+				isRegistrar := false
+				for _, role := range entity.Roles {
+					if role == "registrar" {
+						isRegistrar = true
+						break
+					}
+				}
+				if isRegistrar && len(entity.VcardArray) > 1 {
+					if vcard, ok := entity.VcardArray[1].([]interface{}); ok {
+						for _, field := range vcard {
+							if f, ok := field.([]interface{}); ok && len(f) > 3 {
+								if f[0] == "fn" {
+									billing.Registrar = fmt.Sprint(f[3])
+									break
+								}
+							}
+						}
+					}
+				}
 			}
-			if result.Domain.CreatedDate != "" {
-				billing.RegisteredDate = result.Domain.CreatedDate
+		}
+		resp.Body.Close()
+	}
+
+	// 2. 如果 RDAP 失败，回退到传统的 Whois 查询
+	if !rdapSuccess {
+		raw, err := whois.Whois(d.Domain)
+		if err == nil {
+			result, err := whoisparser.Parse(raw)
+			if err == nil {
+				if result.Registrar.Name != "" {
+					billing.Registrar = result.Registrar.Name
+				}
+				if result.Domain.ExpirationDate != "" {
+					billing.EndDate = result.Domain.ExpirationDate
+				}
+				if result.Domain.CreatedDate != "" {
+					billing.RegisteredDate = result.Domain.CreatedDate
+				}
 			}
 		}
 	}
 
-	// 补充价格同步 (无论 Whois 是否成功，只要有注册商就尝试同步价格)
+	// 3. 补充价格同步
 	SyncDomainPrice(&billing, d.Domain)
 
 	newBillingData, err := json.Marshal(billing)
@@ -136,8 +188,11 @@ func SyncDomainWHOIS(d *model.Domain) error {
 		return fmt.Errorf("数据库保存失败: %w", saveErr)
 	}
 
-	// 如果 Whois 失败了，返回 Whois 的错误，但数据可能已经部分更新（如价格）
-	return whoisErr
+	if !rdapSuccess && billing.EndDate == "" {
+		return fmt.Errorf("RDAP 和 Whois 同步均失败，请检查网络或手动输入")
+	}
+
+	return nil
 }
 
 // GetDomains 获取所有域名记录

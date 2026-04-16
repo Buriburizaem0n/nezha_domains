@@ -36,17 +36,18 @@ const (
 	_ = iota
 	NotificationTypeWebhook
 	NotificationTypeSMTP
+	NotificationTypeTelegram
 )
 
 type Notification struct {
 	Common
 	Name              string `json:"name"`
-	Type              uint8  `json:"type"` // 0: Webhook, 1: SMTP
-	URL               string `json:"url"`  // SMTP: host:port, Webhook: url
+	Type              uint8  `json:"type"` // 1: Webhook, 2: SMTP, 3: Telegram
+	URL               string `json:"url"`  // SMTP: host:port, Webhook: url, Telegram: bot_token
 	RequestMethod     uint8  `json:"request_method"`
 	RequestType       uint8  `json:"request_type"`
-	RequestHeader     string `json:"request_header" gorm:"type:longtext"` // SMTP: user, Webhook: header
-	RequestBody       string `json:"request_body" gorm:"type:longtext"`   // SMTP: pass, Webhook: body
+	RequestHeader     string `json:"request_header" gorm:"type:longtext"` // SMTP: user:pass, Webhook: header, Telegram: chat_id
+	RequestBody       string `json:"request_body" gorm:"type:longtext"`   // SMTP: recipient, Webhook: body, Telegram: (ignored)
 	VerifyTLS         *bool  `json:"verify_tls,omitempty"`
 	FormatMetricUnits *bool  `json:"format_metric_units,omitempty"`
 }
@@ -122,6 +123,9 @@ func (ns *NotificationServerBundle) Send(message string) error {
 	n := ns.Notification
 	if n.Type == NotificationTypeSMTP {
 		return ns.sendSMTP(message)
+	}
+	if n.Type == NotificationTypeTelegram {
+		return ns.sendTelegram(message)
 	}
 
 	var client *http.Client
@@ -201,6 +205,34 @@ func (ns *NotificationServerBundle) sendSMTP(message string) error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (ns *NotificationServerBundle) sendTelegram(message string) error {
+	n := ns.Notification
+	// URL: bot_token
+	// RequestHeader: chat_id
+	token := n.URL
+	chatID := n.RequestHeader
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+
+	params := url.Values{}
+	params.Add("chat_id", chatID)
+	params.Add("text", message)
+	params.Add("parse_mode", "HTML")
+
+	resp, err := http.PostForm(apiURL, params)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Telegram API Error (%d): %s", resp.StatusCode, string(body))
+	}
+
 	return nil
 }
 

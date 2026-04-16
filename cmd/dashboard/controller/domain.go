@@ -3,6 +3,7 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -131,7 +132,7 @@ func SyncDomainWHOIS(c *gin.Context) (any, error) {
 	}
 
 	if err := singleton.SyncDomainWHOIS(domain); err != nil {
-		return nil, newGormError("Whois 同步失败: %s", err.Error())
+		return nil, fmt.Errorf("Whois 同步失败: %v", err)
 	}
 
 	return domain, nil

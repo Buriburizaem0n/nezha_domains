@@ -95,33 +95,34 @@ func SyncDomainPrice(billing *model.BillingDataMod, domainName string) {
 
 // SyncDomainWHOIS 从 Whois 获取域名信息并同步到 BillingData
 func SyncDomainWHOIS(d *model.Domain) error {
-	raw, err := whois.Whois(d.Domain)
-	if err != nil {
-		return fmt.Errorf("Whois查询失败: %w", err)
-	}
-
-	result, err := whoisparser.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("Whois解析失败: %w", err)
-	}
-
 	var billing model.BillingDataMod
 	if d.BillingData != nil && len(d.BillingData) > 0 {
 		json.Unmarshal(d.BillingData, &billing)
 	}
 
-	// 填充 Whois 信息
-	if result.Registrar.Name != "" {
-		billing.Registrar = result.Registrar.Name
-	}
-	if result.Domain.ExpirationDate != "" {
-		billing.EndDate = result.Domain.ExpirationDate
-	}
-	if result.Domain.CreatedDate != "" {
-		billing.RegisteredDate = result.Domain.CreatedDate
+	whoisErr := error(nil)
+	raw, err := whois.Whois(d.Domain)
+	if err != nil {
+		whoisErr = fmt.Errorf("Whois查询失败: %w", err)
+	} else {
+		result, err := whoisparser.Parse(raw)
+		if err != nil {
+			whoisErr = fmt.Errorf("Whois解析失败: %w", err)
+		} else {
+			// 填充 Whois 信息
+			if result.Registrar.Name != "" {
+				billing.Registrar = result.Registrar.Name
+			}
+			if result.Domain.ExpirationDate != "" {
+				billing.EndDate = result.Domain.ExpirationDate
+			}
+			if result.Domain.CreatedDate != "" {
+				billing.RegisteredDate = result.Domain.CreatedDate
+			}
+		}
 	}
 
-	// 补充价格同步
+	// 补充价格同步 (无论 Whois 是否成功，只要有注册商就尝试同步价格)
 	SyncDomainPrice(&billing, d.Domain)
 
 	newBillingData, err := json.Marshal(billing)
@@ -130,7 +131,13 @@ func SyncDomainWHOIS(d *model.Domain) error {
 	}
 
 	d.BillingData = newBillingData
-	return DB.Save(d).Error
+	saveErr := DB.Save(d).Error
+	if saveErr != nil {
+		return fmt.Errorf("数据库保存失败: %w", saveErr)
+	}
+
+	// 如果 Whois 失败了，返回 Whois 的错误，但数据可能已经部分更新（如价格）
+	return whoisErr
 }
 
 // GetDomains 获取所有域名记录

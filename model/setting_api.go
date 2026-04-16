@@ -13,6 +13,11 @@ type SettingForm struct {
 	WebRealIPHeader             string `json:"web_real_ip_header,omitempty" validate:"optional"`   // 前端真实IP
 	AgentRealIPHeader           string `json:"agent_real_ip_header,omitempty" validate:"optional"` // Agent真实IP
 	UserTemplate                string `json:"user_template,omitempty" validate:"optional"`
+	CustomLogo                  string `json:"custom_logo,omitempty" validate:"optional"`
+	CustomDescription           string `json:"custom_description,omitempty" validate:"optional"`
+	CustomLinks                 string `json:"custom_links,omitempty" validate:"optional"`
+	BackgroundImageDay          string `json:"background_image_day,omitempty" validate:"optional"`
+	BackgroundImageNight         string `json:"background_image_night,omitempty" validate:"optional"`
 
 	AgentTLS                    bool `json:"tls,omitempty" validate:"optional"`
 	EnableIPChangeNotification  bool `json:"enable_ip_change_notification,omitempty" validate:"optional"`

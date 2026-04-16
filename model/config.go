@@ -26,6 +26,11 @@ type ConfigForGuests struct {
 	SiteName            string `koanf:"site_name" json:"site_name"`
 	CustomCode          string `koanf:"custom_code" json:"custom_code,omitempty"`
 	CustomCodeDashboard string `koanf:"custom_code_dashboard" json:"custom_code_dashboard,omitempty"`
+	CustomLogo          string `koanf:"custom_logo" json:"custom_logo,omitempty"`
+	CustomDescription   string `koanf:"custom_description" json:"custom_description,omitempty"`
+	CustomLinks         string `koanf:"custom_links" json:"custom_links,omitempty"`
+	BackgroundImageDay  string `koanf:"background_image_day" json:"background_image_day,omitempty"`
+	BackgroundImageNight string `koanf:"background_image_night" json:"background_image_night,omitempty"`
 }
 
 type ConfigDashboard struct {

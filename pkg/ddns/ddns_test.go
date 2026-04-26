@@ -14,8 +14,8 @@ type testSt struct {
 func TestSplitDomainSOA(t *testing.T) {
 	cases := []testSt{
 		{
-			domain: "www.example.co.uk",
-			zone:   "example.co.uk.",
+			domain: "www.google.co.uk",
+			zone:   "google.co.uk.",
 			prefix: "www",
 		},
 		{

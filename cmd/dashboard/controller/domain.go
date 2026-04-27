@@ -137,3 +137,8 @@ func SyncDomainWHOIS(c *gin.Context) (any, error) {
 
 	return domain, nil
 }
+
+func SyncAllDomains(c *gin.Context) (any, error) {
+	singleton.SyncAllDomains()
+	return nil, nil
+}

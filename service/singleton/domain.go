@@ -195,6 +195,32 @@ func SyncDomainWHOIS(d *model.Domain) error {
 	return nil
 }
 
+// SyncAllDomains 异步批量同步所有已验证域名的 Whois 和价格信息
+func SyncAllDomains() {
+	go func() {
+		log.Println("NEZHA>> 开始批量同步所有域名的 Whois 和价格信息...")
+		domains, err := GetDomains("admin")
+		if err != nil {
+			log.Printf("NEZHA>> 批量同步域名失败: %v", err)
+			return
+		}
+
+		successCount := 0
+		for _, d := range domains {
+			if d.Status == "verified" {
+				if err := SyncDomainWHOIS(&d); err != nil {
+					log.Printf("NEZHA>> 域名 %s 同步失败: %v", d.Domain, err)
+				} else {
+					successCount++
+				}
+				// 避免并发过高被 API 限制
+				time.Sleep(2 * time.Second)
+			}
+		}
+		log.Printf("NEZHA>> 批量同步域名结束，成功 %d/%d", successCount, len(domains))
+	}()
+}
+
 // GetDomains 获取所有域名记录
 func GetDomains(scope string) ([]model.Domain, error) {
 	var domains []model.Domain
@@ -354,7 +380,7 @@ func CronJobForDomainStatus() {
 			msg := ""
 			switch daysLeft + 1 {
 			case 60, 30, 15, 7, 3, 1:
-				msg = fmt.Sprintf("域名 [%s] 即将到期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft+1, endDate.Format("2006-01-02"))
+				msg = fmt.Sprintf("域名 [%s] 即通知期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft+1, endDate.Format("2006-01-02"))
 			case 0:
 				msg = fmt.Sprintf("域名 [%s] 已到期！到期时间: %s", d.Domain, endDate.Format("2006-01-02"))
 			}

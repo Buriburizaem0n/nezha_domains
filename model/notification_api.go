@@ -10,4 +10,5 @@ type NotificationForm struct {
 	VerifyTLS         bool   `json:"verify_tls,omitempty" validate:"optional"`
 	SkipCheck         bool   `json:"skip_check,omitempty" validate:"optional"`
 	FormatMetricUnits bool   `json:"format_metric_units,omitempty" validate:"optional"`
+	Type              uint8  `json:"type,omitempty" validate:"optional"`
 }

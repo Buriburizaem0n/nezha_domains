@@ -1,9 +1,12 @@
 package model
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/smtp"
 	"net/url"
@@ -176,9 +179,6 @@ func (ns *NotificationServerBundle) Send(message string) error {
 
 func (ns *NotificationServerBundle) sendSMTP(message string) error {
 	n := ns.Notification
-	// RequestHeader: user:pass
-	// RequestBody: to_email
-	// URL: host:port
 	authInfo := strings.SplitN(n.RequestHeader, ":", 2)
 	if len(authInfo) < 2 {
 		return errors.New("SMTP认证信息格式错误 (user:pass)")
@@ -187,31 +187,129 @@ func (ns *NotificationServerBundle) sendSMTP(message string) error {
 	pass := authInfo[1]
 	to := n.RequestBody
 
-	hp := strings.SplitN(n.URL, ":", 2)
-	if len(hp) < 2 {
+	host, port, err := net.SplitHostPort(n.URL)
+	if err != nil {
 		return errors.New("SMTP服务器地址格式错误 (host:port)")
 	}
-
-	auth := smtp.PlainAuth("", user, pass, hp[0])
 
 	subject := "Nezha Monitoring Alert"
 	if ns.Server != nil {
 		subject = fmt.Sprintf("Nezha Alert: %s", ns.Server.Name)
 	}
 
-	body := fmt.Sprintf("To: %s\r\nSubject: %s\r\n\r\n%s", to, subject, message)
-
-	err := smtp.SendMail(n.URL, auth, user, []string{to}, []byte(body))
-	if err != nil {
-		return err
+	// 提取真实的发件人邮箱 (处理 username != email 的情况)
+	fromEmail := user
+	if !strings.Contains(user, "@") {
+		// 如果用户名不是邮箱，为了防止被拦截，构造一个合法的From
+		fromEmail = fmt.Sprintf("nezha@%s", host)
 	}
+
+	// 遵循 RFC 2822
+	header := make(map[string]string)
+	header["From"] = fmt.Sprintf("Nezha Monitoring <%s>", fromEmail)
+	header["To"] = to
+	header["Subject"] = subject
+	header["Date"] = time.Now().Format(time.RFC1123Z)
+	header["Content-Type"] = "text/plain; charset=UTF-8"
+
+	var msg strings.Builder
+	for k, v := range header {
+		msg.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(message)
+
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: n.VerifyTLS == nil || !*n.VerifyTLS,
+		ServerName:         host,
+	}
+
+	auth := smtp.PlainAuth("", user, pass, host)
+
+	if port == "465" {
+		// SMTPS (Implicit SSL)
+		conn, err := tls.Dial("tcp", n.URL, tlsConfig)
+		if err != nil {
+			return fmt.Errorf("SMTP SSL Dial error: %w", err)
+		}
+		defer conn.Close()
+
+		client, err := smtp.NewClient(conn, host)
+		if err != nil {
+			return fmt.Errorf("SMTP NewClient error: %w", err)
+		}
+		defer client.Quit()
+
+		if err = client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP Auth error: %w", err)
+		}
+		if err = client.Mail(fromEmail); err != nil {
+			return fmt.Errorf("SMTP Mail error: %w", err)
+		}
+		if err = client.Rcpt(to); err != nil {
+			return fmt.Errorf("SMTP Rcpt error: %w", err)
+		}
+		w, err := client.Data()
+		if err != nil {
+			return fmt.Errorf("SMTP Data error: %w", err)
+		}
+		_, err = w.Write([]byte(msg.String()))
+		if err != nil {
+			return fmt.Errorf("SMTP Write error: %w", err)
+		}
+		err = w.Close()
+		if err != nil {
+			return fmt.Errorf("SMTP Close error: %w", err)
+		}
+		return nil
+	}
+
+	// STARTTLS (Port 25, 587, etc.)
+	conn, err := net.Dial("tcp", n.URL)
+	if err != nil {
+		return fmt.Errorf("SMTP Dial error: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return fmt.Errorf("SMTP NewClient error: %w", err)
+	}
+	defer client.Quit()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err = client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("SMTP StartTLS error: %w", err)
+		}
+	}
+
+	if err = client.Auth(auth); err != nil {
+		return fmt.Errorf("SMTP Auth error: %w", err)
+	}
+	if err = client.Mail(fromEmail); err != nil {
+		return fmt.Errorf("SMTP Mail error: %w", err)
+	}
+	if err = client.Rcpt(to); err != nil {
+		return fmt.Errorf("SMTP Rcpt error: %w", err)
+	}
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("SMTP Data error: %w", err)
+	}
+	_, err = w.Write([]byte(msg.String()))
+	if err != nil {
+		return fmt.Errorf("SMTP Write error: %w", err)
+	}
+	err = w.Close()
+	if err != nil {
+		return fmt.Errorf("SMTP Close error: %w", err)
+	}
+
 	return nil
 }
 
 func (ns *NotificationServerBundle) sendTelegram(message string) error {
 	n := ns.Notification
-	// URL: bot_token
-	// RequestHeader: chat_id
 	token := n.URL
 	chatID := n.RequestHeader
 
@@ -219,10 +317,23 @@ func (ns *NotificationServerBundle) sendTelegram(message string) error {
 
 	params := url.Values{}
 	params.Add("chat_id", chatID)
-	params.Add("text", message)
+	params.Add("text", html.EscapeString(message))
 	params.Add("parse_mode", "HTML")
 
-	resp, err := http.PostForm(apiURL, params)
+	var client *http.Client
+	if n.VerifyTLS != nil && *n.VerifyTLS {
+		client = utils.HttpClient
+	} else {
+		client = utils.HttpClientSkipTlsVerify
+	}
+
+	req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(params.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

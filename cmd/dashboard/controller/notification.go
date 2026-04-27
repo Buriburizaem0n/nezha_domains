@@ -57,6 +57,7 @@ func createNotification(c *gin.Context) (uint64, error) {
 	n.RequestHeader = nf.RequestHeader
 	n.RequestBody = nf.RequestBody
 	n.URL = nf.URL
+	n.Type = nf.Type
 	verifyTLS := nf.VerifyTLS
 	n.VerifyTLS = &verifyTLS
 	formatMetricUnits := nf.FormatMetricUnits
@@ -120,6 +121,7 @@ func updateNotification(c *gin.Context) (any, error) {
 	n.RequestHeader = nf.RequestHeader
 	n.RequestBody = nf.RequestBody
 	n.URL = nf.URL
+	n.Type = nf.Type
 	verifyTLS := nf.VerifyTLS
 	n.VerifyTLS = &verifyTLS
 	formatMetricUnits := nf.FormatMetricUnits

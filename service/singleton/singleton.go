@@ -61,6 +61,9 @@ func LoadSingleton(bus chan<- *model.Service) (err error) {
 	CronShared = NewCronClass()
 	// 最后初始化 ServiceSentinel
 	ServiceSentinelShared, err = NewServiceSentinel(bus)
+	if err == nil {
+		InitTelegramBot()
+	}
 	return
 }
 

@@ -43,7 +43,6 @@ type ConfigDashboard struct {
 	AdminTemplate     string `koanf:"admin_template" json:"admin_template,omitempty"`
 
 	EnablePlainIPInNotification bool   `koanf:"enable_plain_ip_in_notification" json:"enable_plain_ip_in_notification,omitempty"` // 通知信息IP不打码
-	ExpiryNotificationGroupID   uint64 `koanf:"expiry_notification_group_id" json:"expiry_notification_group_id"`
 
 	// IP变更提醒
 	EnableIPChangeNotification  bool   `koanf:"enable_ip_change_notification" json:"enable_ip_change_notification,omitempty"`
@@ -51,7 +50,10 @@ type ConfigDashboard struct {
 	Cover                       uint8  `koanf:"cover" json:"cover"`                                               // 覆盖范围（0:提醒未被 IgnoredIPNotification 包含的所有服务器; 1:仅提醒被 IgnoredIPNotification 包含的服务器;）
 	IgnoredIPNotification       string `koanf:"ignored_ip_notification" json:"ignored_ip_notification,omitempty"` // 特定服务器IP（多个服务器用逗号分隔）
 
-	DNSServers string `koanf:"dns_servers" json:"dns_servers,omitempty"`
+	DNSServers                  string `koanf:"dns_servers" json:"dns_servers,omitempty"`
+	ExpiryNotificationGroupID   uint64 `koanf:"expiry_notification_group_id" json:"expiry_notification_group_id,omitempty"`
+	TelegramBotToken            string `koanf:"telegram_bot_token" json:"telegram_bot_token,omitempty"`
+	TelegramAdminChatID         string `koanf:"telegram_admin_chat_id" json:"telegram_admin_chat_id,omitempty"`
 }
 
 type Config struct {

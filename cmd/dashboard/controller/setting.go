@@ -111,8 +111,8 @@ func updateConfig(c *gin.Context) (any, error) {
 	singleton.Conf.CustomLogo = sf.CustomLogo
 	singleton.Conf.CustomDescription = sf.CustomDescription
 	singleton.Conf.CustomLinks = sf.CustomLinks
-	singleton.Conf.BackgroundImageDay = sf.BackgroundImageDay
-	singleton.Conf.BackgroundImageNight = sf.BackgroundImageNight
+	singleton.Conf.TelegramBotToken = sf.TelegramBotToken
+	singleton.Conf.TelegramAdminChatID = sf.TelegramAdminChatID
 
 	if err := singleton.Conf.Save(); err != nil {
 		return nil, newGormError("%v", err)

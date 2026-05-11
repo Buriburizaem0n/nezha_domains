@@ -21,6 +21,8 @@ require (
 	github.com/libdns/cloudflare v0.2.2
 	github.com/libdns/he v1.2.1
 	github.com/libdns/libdns v1.1.1
+	github.com/likexian/whois v1.15.7
+	github.com/likexian/whois-parser v1.24.21
 	github.com/miekg/dns v1.1.72
 	github.com/nezhahq/libdns-tencentcloud v0.0.0-20250501081622-bd293105845a
 	github.com/ory/graceful v0.2.0
@@ -86,8 +88,6 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/likexian/gokit v0.25.16 // indirect
-	github.com/likexian/whois v1.15.7 // indirect
-	github.com/likexian/whois-parser v1.24.21 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-sqlite3 v1.14.37 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect

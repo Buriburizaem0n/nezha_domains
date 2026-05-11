@@ -60,6 +60,9 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	api.POST("/login", authMiddleware.LoginHandler)
 	api.GET("/oauth2/:provider", commonHandler(oauth2redirect))
 
+	r.GET("/script/:name", serveScript)
+	r.GET("/script/bin/:os/:arch", serveAgentBinary)
+
 	fallbackAuthMw := fallbackAuthMiddleware(authMiddleware)
 	fallbackAuth := api.Group("", fallbackAuthMw)
 	fallbackAuth.GET("/setting", commonHandler(listConfig))
@@ -82,7 +85,6 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	auth := api.Group("", authMw)
 
 	auth.GET("/refresh-token", authMiddleware.RefreshHandler)
-
 
 	auth.GET("/file", commonHandler(createFM))
 	auth.GET("/ws/file/:id", commonHandler(fmStream))

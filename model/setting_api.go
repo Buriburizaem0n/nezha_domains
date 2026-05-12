@@ -25,6 +25,13 @@ type SettingForm struct {
 	ExpiryNotificationGroupID   uint64 `json:"expiry_notification_group_id,omitempty"`
 	TelegramBotToken            string `json:"telegram_bot_token,omitempty" validate:"optional"`
 	TelegramAdminChatID         string `json:"telegram_admin_chat_id,omitempty" validate:"optional"`
+
+	SMTPServer                  string `json:"smtp_server,omitempty" validate:"optional"`
+	SMTPUser                    string `json:"smtp_user,omitempty" validate:"optional"`
+	SMTPPassword                string `json:"smtp_password,omitempty" validate:"optional"`
+	AdminEmail                  string `json:"admin_email,omitempty" validate:"optional"`
+	DomainExpiryNotificationDays string `json:"domain_expiry_notification_days,omitempty" validate:"optional"`
+	ServerExpiryNotificationDays string `json:"server_expiry_notification_days,omitempty" validate:"optional"`
 }
 
 type Setting struct {

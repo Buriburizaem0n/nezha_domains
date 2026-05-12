@@ -1,14 +1,10 @@
 package model
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"html"
 	"io"
-	"net"
 	"net/http"
-	"net/smtp"
 	"net/url"
 	"strings"
 	"time"
@@ -38,8 +34,13 @@ type NotificationServerBundle struct {
 const (
 	_ = iota
 	NotificationTypeWebhook
-	NotificationTypeSMTP
+	NotificationTypeEmail
 	NotificationTypeTelegram
+)
+
+var (
+	SendGlobalTelegramFunc func(message string) error
+	SendGlobalEmailFunc    func(message string) error
 )
 
 type Notification struct {
@@ -49,8 +50,8 @@ type Notification struct {
 	URL               string `json:"url"`  // SMTP: host:port, Webhook: url, Telegram: bot_token
 	RequestMethod     uint8  `json:"request_method"`
 	RequestType       uint8  `json:"request_type"`
-	RequestHeader     string `json:"request_header" gorm:"type:longtext"` // SMTP: user:pass, Webhook: header, Telegram: chat_id
-	RequestBody       string `json:"request_body" gorm:"type:longtext"`   // SMTP: recipient, Webhook: body, Telegram: (ignored)
+	RequestHeader     string `json:"request_header" gorm:"type:longtext"` // Webhook: header
+	RequestBody       string `json:"request_body" gorm:"type:longtext"`   // Webhook: body
 	VerifyTLS         *bool  `json:"verify_tls,omitempty"`
 	FormatMetricUnits *bool  `json:"format_metric_units,omitempty"`
 }
@@ -124,11 +125,21 @@ func (n *Notification) setRequestHeader(req *http.Request) error {
 
 func (ns *NotificationServerBundle) Send(message string) error {
 	n := ns.Notification
-	if n.Type == NotificationTypeSMTP {
-		return ns.sendSMTP(message)
-	}
-	if n.Type == NotificationTypeTelegram {
-		return ns.sendTelegram(message)
+
+	if n.Type == NotificationTypeEmail || n.Type == NotificationTypeTelegram {
+		template := n.RequestBody
+		if template == "" {
+			template = message
+		}
+		content := ns.replaceParamsInString(template, message, nil)
+
+		if n.Type == NotificationTypeEmail && SendGlobalEmailFunc != nil {
+			return SendGlobalEmailFunc(content)
+		}
+		if n.Type == NotificationTypeTelegram && SendGlobalTelegramFunc != nil {
+			return SendGlobalTelegramFunc(content)
+		}
+		return nil
 	}
 
 	var client *http.Client
@@ -177,175 +188,9 @@ func (ns *NotificationServerBundle) Send(message string) error {
 	return nil
 }
 
-func (ns *NotificationServerBundle) sendSMTP(message string) error {
-	n := ns.Notification
-	authInfo := strings.SplitN(n.RequestHeader, ":", 2)
-	if len(authInfo) < 2 {
-		return errors.New("SMTP认证信息格式错误 (user:pass)")
-	}
-	user := authInfo[0]
-	pass := authInfo[1]
-	to := n.RequestBody
 
-	host, port, err := net.SplitHostPort(n.URL)
-	if err != nil {
-		return errors.New("SMTP服务器地址格式错误 (host:port)")
-	}
 
-	subject := "Nezha Monitoring Alert"
-	if ns.Server != nil {
-		subject = fmt.Sprintf("Nezha Alert: %s", ns.Server.Name)
-	}
 
-	// 提取真实的发件人邮箱 (处理 username != email 的情况)
-	fromEmail := user
-	if !strings.Contains(user, "@") {
-		// 如果用户名不是邮箱，为了防止被拦截，构造一个合法的From
-		fromEmail = fmt.Sprintf("nezha@%s", host)
-	}
-
-	// 遵循 RFC 2822
-	header := make(map[string]string)
-	header["From"] = fmt.Sprintf("Nezha Monitoring <%s>", fromEmail)
-	header["To"] = to
-	header["Subject"] = subject
-	header["Date"] = time.Now().Format(time.RFC1123Z)
-	header["Content-Type"] = "text/plain; charset=UTF-8"
-
-	var msg strings.Builder
-	for k, v := range header {
-		msg.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
-	}
-	msg.WriteString("\r\n")
-	msg.WriteString(message)
-
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: n.VerifyTLS == nil || !*n.VerifyTLS,
-		ServerName:         host,
-	}
-
-	auth := smtp.PlainAuth("", user, pass, host)
-
-	if port == "465" {
-		// SMTPS (Implicit SSL)
-		conn, err := tls.Dial("tcp", n.URL, tlsConfig)
-		if err != nil {
-			return fmt.Errorf("SMTP SSL Dial error: %w", err)
-		}
-		defer conn.Close()
-
-		client, err := smtp.NewClient(conn, host)
-		if err != nil {
-			return fmt.Errorf("SMTP NewClient error: %w", err)
-		}
-		defer client.Quit()
-
-		if err = client.Auth(auth); err != nil {
-			return fmt.Errorf("SMTP Auth error: %w", err)
-		}
-		if err = client.Mail(fromEmail); err != nil {
-			return fmt.Errorf("SMTP Mail error: %w", err)
-		}
-		if err = client.Rcpt(to); err != nil {
-			return fmt.Errorf("SMTP Rcpt error: %w", err)
-		}
-		w, err := client.Data()
-		if err != nil {
-			return fmt.Errorf("SMTP Data error: %w", err)
-		}
-		_, err = w.Write([]byte(msg.String()))
-		if err != nil {
-			return fmt.Errorf("SMTP Write error: %w", err)
-		}
-		err = w.Close()
-		if err != nil {
-			return fmt.Errorf("SMTP Close error: %w", err)
-		}
-		return nil
-	}
-
-	// STARTTLS (Port 25, 587, etc.)
-	conn, err := net.Dial("tcp", n.URL)
-	if err != nil {
-		return fmt.Errorf("SMTP Dial error: %w", err)
-	}
-	defer conn.Close()
-
-	client, err := smtp.NewClient(conn, host)
-	if err != nil {
-		return fmt.Errorf("SMTP NewClient error: %w", err)
-	}
-	defer client.Quit()
-
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		if err = client.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("SMTP StartTLS error: %w", err)
-		}
-	}
-
-	if err = client.Auth(auth); err != nil {
-		return fmt.Errorf("SMTP Auth error: %w", err)
-	}
-	if err = client.Mail(fromEmail); err != nil {
-		return fmt.Errorf("SMTP Mail error: %w", err)
-	}
-	if err = client.Rcpt(to); err != nil {
-		return fmt.Errorf("SMTP Rcpt error: %w", err)
-	}
-	w, err := client.Data()
-	if err != nil {
-		return fmt.Errorf("SMTP Data error: %w", err)
-	}
-	_, err = w.Write([]byte(msg.String()))
-	if err != nil {
-		return fmt.Errorf("SMTP Write error: %w", err)
-	}
-	err = w.Close()
-	if err != nil {
-		return fmt.Errorf("SMTP Close error: %w", err)
-	}
-
-	return nil
-}
-
-func (ns *NotificationServerBundle) sendTelegram(message string) error {
-	n := ns.Notification
-	token := n.URL
-	chatID := n.RequestHeader
-
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-
-	params := url.Values{}
-	params.Add("chat_id", chatID)
-	params.Add("text", html.EscapeString(message))
-	params.Add("parse_mode", "HTML")
-
-	var client *http.Client
-	if n.VerifyTLS != nil && *n.VerifyTLS {
-		client = utils.HttpClient
-	} else {
-		client = utils.HttpClientSkipTlsVerify
-	}
-
-	req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(params.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Telegram API Error (%d): %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
 
 // replaceParamInString 替换字符串中的占位符
 func (ns *NotificationServerBundle) replaceParamsInString(str string, message string, mod func(string) string) string {
@@ -359,9 +204,35 @@ func (ns *NotificationServerBundle) replaceParamsInString(str string, message st
 	}
 
 	if ns.Server != nil {
+		var noteData struct {
+			BillingDataMod struct {
+				EndDate string `json:"endDate"`
+				Amount  string `json:"amount"`
+				Cycle   string `json:"cycle"`
+			} `json:"billingDataMod"`
+		}
+		expiresStr := ""
+		amountStr := ""
+		cycleStr := ""
+
+		if ns.Server.Note != "" && json.Unmarshal([]byte(ns.Server.Note), &noteData) == nil && noteData.BillingDataMod.EndDate != "" {
+			expiresStr = noteData.BillingDataMod.EndDate
+			amountStr = noteData.BillingDataMod.Amount
+			cycleStr = noteData.BillingDataMod.Cycle
+		} else if ns.Server.PublicNote != "" && json.Unmarshal([]byte(ns.Server.PublicNote), &noteData) == nil && noteData.BillingDataMod.EndDate != "" {
+			expiresStr = noteData.BillingDataMod.EndDate
+			amountStr = noteData.BillingDataMod.Amount
+			cycleStr = noteData.BillingDataMod.Cycle
+		}
+
 		replacements = append(replacements,
 			"#SERVER.NAME#", mod(ns.Server.Name),
 			"#SERVER.ID#", mod(fmt.Sprintf("%d", ns.Server.ID)),
+			"#SERVER.NOTE#", mod(ns.Server.Note),
+			"#SERVER.PUBLIC_NOTE#", mod(ns.Server.PublicNote),
+			"#SERVER.EXPIRE_DATE#", mod(expiresStr),
+			"#SERVER.BILLING_AMOUNT#", mod(amountStr),
+			"#SERVER.BILLING_CYCLE#", mod(cycleStr),
 
 			// Converted metrics
 			"#SERVER.CPU#", mod(ns.formatUsage(false, ns.Server.State.CPU)),

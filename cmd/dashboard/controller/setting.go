@@ -113,6 +113,12 @@ func updateConfig(c *gin.Context) (any, error) {
 	singleton.Conf.CustomLinks = sf.CustomLinks
 	singleton.Conf.TelegramBotToken = sf.TelegramBotToken
 	singleton.Conf.TelegramAdminChatID = sf.TelegramAdminChatID
+	singleton.Conf.SMTPServer = sf.SMTPServer
+	singleton.Conf.SMTPUser = sf.SMTPUser
+	singleton.Conf.SMTPPassword = sf.SMTPPassword
+	singleton.Conf.AdminEmail = sf.AdminEmail
+	singleton.Conf.DomainExpiryNotificationDays = sf.DomainExpiryNotificationDays
+	singleton.Conf.ServerExpiryNotificationDays = sf.ServerExpiryNotificationDays
 
 	if err := singleton.Conf.Save(); err != nil {
 		return nil, newGormError("%v", err)

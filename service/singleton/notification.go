@@ -2,9 +2,15 @@ package singleton
 
 import (
 	"cmp"
+	"crypto/tls"
 	"fmt"
+	"html"
 	"log"
+	"net"
+	"net/smtp"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +21,35 @@ import (
 const (
 	firstNotificationDelay = time.Minute * 15
 )
+
+func init() {
+	model.SendGlobalTelegramFunc = func(message string) error {
+		if Conf.TelegramBotToken != "" && Conf.TelegramAdminChatID != "" {
+			adminChatID, err := strconv.ParseInt(Conf.TelegramAdminChatID, 10, 64)
+			if err == nil && adminChatID != 0 {
+				safeDesc := html.EscapeString(message)
+				msg := fmt.Sprintf("⚠️ <b>Nezha 报警通知</b>\n\n%s", safeDesc)
+				sendTGMessage(adminChatID, msg)
+				log.Printf("NEZHA>> Sent notification to Telegram Admin Bot")
+				return nil
+			}
+		}
+		return nil
+	}
+
+	model.SendGlobalEmailFunc = func(message string) error {
+		if Conf.SMTPServer != "" && Conf.SMTPUser != "" && Conf.SMTPPassword != "" && Conf.AdminEmail != "" {
+			if err := sendSMTPAdminNotification(message); err != nil {
+				log.Printf("NEZHA>> Sending admin email notification failed: %v", err)
+				return err
+			} else {
+				log.Printf("NEZHA>> Sent notification to Admin Email")
+				return nil
+			}
+		}
+		return nil
+	}
+}
 
 type NotificationClass struct {
 	class[uint64, *model.Notification]
@@ -255,6 +290,113 @@ func (c *NotificationClass) SendNotification(notificationGroupID uint64, desc st
 			log.Printf("NEZHA>> Sending notification to %s succeeded", n.Name)
 		}
 	}
+}
+
+func sendSMTPAdminNotification(message string) error {
+	host, port, err := net.SplitHostPort(Conf.SMTPServer)
+	if err != nil {
+		return fmt.Errorf("SMTP服务器地址格式错误 (host:port)")
+	}
+
+	fromEmail := Conf.SMTPUser
+	if !strings.Contains(Conf.SMTPUser, "@") {
+		fromEmail = fmt.Sprintf("nezha@%s", host)
+	}
+
+	header := make(map[string]string)
+	header["From"] = fmt.Sprintf("Nezha Monitoring <%s>", fromEmail)
+	header["To"] = Conf.AdminEmail
+	header["Subject"] = "Nezha Monitoring Alert"
+	header["Date"] = time.Now().Format(time.RFC1123Z)
+	header["Content-Type"] = "text/plain; charset=UTF-8"
+
+	var msg strings.Builder
+	for k, v := range header {
+		msg.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(message)
+
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         host,
+	}
+
+	auth := smtp.PlainAuth("", Conf.SMTPUser, Conf.SMTPPassword, host)
+
+	if port == "465" {
+		conn, err := tls.Dial("tcp", Conf.SMTPServer, tlsConfig)
+		if err != nil {
+			return fmt.Errorf("SMTP SSL Dial error: %w", err)
+		}
+		defer conn.Close()
+
+		client, err := smtp.NewClient(conn, host)
+		if err != nil {
+			return fmt.Errorf("SMTP NewClient error: %w", err)
+		}
+		defer client.Quit()
+
+		if err = client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP Auth error: %w", err)
+		}
+		if err = client.Mail(fromEmail); err != nil {
+			return fmt.Errorf("SMTP Mail error: %w", err)
+		}
+		if err = client.Rcpt(Conf.AdminEmail); err != nil {
+			return fmt.Errorf("SMTP Rcpt error: %w", err)
+		}
+		w, err := client.Data()
+		if err != nil {
+			return fmt.Errorf("SMTP Data error: %w", err)
+		}
+		if _, err = w.Write([]byte(msg.String())); err != nil {
+			return fmt.Errorf("SMTP Write error: %w", err)
+		}
+		if err = w.Close(); err != nil {
+			return fmt.Errorf("SMTP Close error: %w", err)
+		}
+		return nil
+	}
+
+	conn, err := net.Dial("tcp", Conf.SMTPServer)
+	if err != nil {
+		return fmt.Errorf("SMTP Dial error: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return fmt.Errorf("SMTP NewClient error: %w", err)
+	}
+	defer client.Quit()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err = client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("SMTP StartTLS error: %w", err)
+		}
+	}
+
+	if err = client.Auth(auth); err != nil {
+		return fmt.Errorf("SMTP Auth error: %w", err)
+	}
+	if err = client.Mail(fromEmail); err != nil {
+		return fmt.Errorf("SMTP Mail error: %w", err)
+	}
+	if err = client.Rcpt(Conf.AdminEmail); err != nil {
+		return fmt.Errorf("SMTP Rcpt error: %w", err)
+	}
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("SMTP Data error: %w", err)
+	}
+	if _, err = w.Write([]byte(msg.String())); err != nil {
+		return fmt.Errorf("SMTP Write error: %w", err)
+	}
+	if err = w.Close(); err != nil {
+		return fmt.Errorf("SMTP Close error: %w", err)
+	}
+	return nil
 }
 
 type _NotificationMuteLabel struct{}

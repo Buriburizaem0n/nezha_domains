@@ -10,6 +10,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -340,6 +342,36 @@ func DeleteDomain(id uint64) error {
 	return DB.Delete(&model.Domain{}, id).Error
 }
 
+func isDomainNotificationDay(daysLeft int) bool {
+	daysStr := Conf.DomainExpiryNotificationDays
+	if daysStr == "" {
+		return slices.Contains([]int{60, 30, 15, 7, 3, 1, 0}, daysLeft+1)
+	}
+	parts := strings.Split(daysStr, ",")
+	for _, p := range parts {
+		d, err := strconv.Atoi(strings.TrimSpace(p))
+		if err == nil && d == daysLeft+1 {
+			return true
+		}
+	}
+	return false
+}
+
+func isServerNotificationDay(daysLeft int) bool {
+	daysStr := Conf.ServerExpiryNotificationDays
+	if daysStr == "" {
+		return slices.Contains([]int{30, 15, 7, 3, 1, 0}, daysLeft+1)
+	}
+	parts := strings.Split(daysStr, ",")
+	for _, p := range parts {
+		d, err := strconv.Atoi(strings.TrimSpace(p))
+		if err == nil && d == daysLeft+1 {
+			return true
+		}
+	}
+	return false
+}
+
 // CronJobForDomainStatus 检查域名到期和自动续费的定时任务
 func CronJobForDomainStatus() {
 	log.Println("NEZHA>> Cron::开始执行域名状态检查任务")
@@ -376,17 +408,14 @@ func CronJobForDomainStatus() {
 		daysLeft := int(endDate.Sub(now).Hours() / 24)
 
 		// 只有在到期前一定天数通知，且避开重复通知 (简单逻辑：每天通知一次)
-		if Conf.ExpiryNotificationGroupID != 0 {
+		if Conf.ExpiryNotificationGroupID != 0 && isDomainNotificationDay(daysLeft) {
 			msg := ""
-			switch daysLeft + 1 {
-			case 60, 30, 15, 7, 3, 1:
-				msg = fmt.Sprintf("域名 [%s] 即通知期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft+1, endDate.Format("2006-01-02"))
-			case 0:
+			if daysLeft+1 > 0 {
+				msg = fmt.Sprintf("域名 [%s] 即将到期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft+1, endDate.Format("2006-01-02"))
+			} else {
 				msg = fmt.Sprintf("域名 [%s] 已到期！到期时间: %s", d.Domain, endDate.Format("2006-01-02"))
 			}
-			if msg != "" {
-				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-domain-%d-%d", d.ID, daysLeft))
-			}
+			NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-domain-%d-%d", d.ID, daysLeft))
 		}
 
 		if now.After(endDate) {
@@ -457,17 +486,14 @@ func CronJobForServerStatus() {
 
 		daysLeft := int(endDate.Sub(now).Hours() / 24)
 
-		if Conf.ExpiryNotificationGroupID != 0 {
+		if Conf.ExpiryNotificationGroupID != 0 && isServerNotificationDay(daysLeft) {
 			msg := ""
-			switch daysLeft + 1 {
-			case 30, 15, 7, 3, 1:
+			if daysLeft+1 > 0 {
 				msg = fmt.Sprintf("VPS [%s] 即将到期，剩余 %d 天。到期时间: %s", s.Name, daysLeft+1, endDate.Format("2006-01-02"))
-			case 0:
+			} else {
 				msg = fmt.Sprintf("VPS [%s] 已到期！到期时间: %s", s.Name, endDate.Format("2006-01-02"))
 			}
-			if msg != "" {
-				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-server-%d-%d", s.ID, daysLeft))
-			}
+			NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-server-%d-%d", s.ID, daysLeft), &s)
 		}
 	}
 	log.Println("NEZHA>> Cron::服务器到期检查任务执行完毕")

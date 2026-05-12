@@ -54,6 +54,13 @@ type ConfigDashboard struct {
 	ExpiryNotificationGroupID   uint64 `koanf:"expiry_notification_group_id" json:"expiry_notification_group_id,omitempty"`
 	TelegramBotToken            string `koanf:"telegram_bot_token" json:"telegram_bot_token,omitempty"`
 	TelegramAdminChatID         string `koanf:"telegram_admin_chat_id" json:"telegram_admin_chat_id,omitempty"`
+
+	SMTPServer                  string `koanf:"smtp_server" json:"smtp_server,omitempty"`
+	SMTPUser                    string `koanf:"smtp_user" json:"smtp_user,omitempty"`
+	SMTPPassword                string `koanf:"smtp_password" json:"smtp_password,omitempty"`
+	AdminEmail                  string `koanf:"admin_email" json:"admin_email,omitempty"`
+	DomainExpiryNotificationDays string `koanf:"domain_expiry_notification_days" json:"domain_expiry_notification_days,omitempty"`
+	ServerExpiryNotificationDays string `koanf:"server_expiry_notification_days" json:"server_expiry_notification_days,omitempty"`
 }
 
 type Config struct {

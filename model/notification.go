@@ -233,48 +233,83 @@ func (ns *NotificationServerBundle) replaceParamsInString(str string, message st
 			"#SERVER.EXPIRE_DATE#", mod(expiresStr),
 			"#SERVER.BILLING_AMOUNT#", mod(amountStr),
 			"#SERVER.BILLING_CYCLE#", mod(cycleStr),
-
-			// Converted metrics
-			"#SERVER.CPU#", mod(ns.formatUsage(false, ns.Server.State.CPU)),
-			"#SERVER.MEM#", mod(ns.formatUsage(true, float64(ns.Server.State.MemUsed)/float64(ns.Server.Host.MemTotal))),
-			"#SERVER.SWAP#", mod(ns.formatUsage(true, float64(ns.Server.State.SwapUsed)/float64(ns.Server.Host.SwapTotal))),
-			"#SERVER.DISK#", mod(ns.formatUsage(true, float64(ns.Server.State.DiskUsed)/float64(ns.Server.Host.DiskTotal))),
-			"#SERVER.SPEEDIN#", mod(fmt.Sprintf("%s/s", ns.formatSize(ns.Server.State.NetInSpeed))),
-			"#SERVER.SPEEDOUT#", mod(fmt.Sprintf("%s/s", ns.formatSize(ns.Server.State.NetOutSpeed))),
-			"#SERVER.TRANSFERIN#", mod(ns.formatSize(ns.Server.State.NetInTransfer)),
-			"#SERVER.TRANSFEROUT#", mod(ns.formatSize(ns.Server.State.NetOutTransfer)),
-
-			// Raw metrics
-			"#SERVER.CPUUSED#", mod(fmt.Sprintf("%f", ns.Server.State.CPU)),
-			"#SERVER.MEMUSED#", mod(fmt.Sprintf("%d", ns.Server.State.MemUsed)),
-			"#SERVER.SWAPUSED#", mod(fmt.Sprintf("%d", ns.Server.State.SwapUsed)),
-			"#SERVER.DISKUSED#", mod(fmt.Sprintf("%d", ns.Server.State.DiskUsed)),
-			"#SERVER.MEMTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.MemTotal)),
-			"#SERVER.SWAPTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.SwapTotal)),
-			"#SERVER.DISKTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.DiskTotal)),
-			"#SERVER.NETINSPEED#", mod(fmt.Sprintf("%d", ns.Server.State.NetInSpeed)),
-			"#SERVER.NETOUTSPEED#", mod(fmt.Sprintf("%d", ns.Server.State.NetOutSpeed)),
-			"#SERVER.NETINTRANSFER#", mod(fmt.Sprintf("%d", ns.Server.State.NetInTransfer)),
-			"#SERVER.NETOUTTRANSFER#", mod(fmt.Sprintf("%d", ns.Server.State.NetOutTransfer)),
-			"#SERVER.LOAD1#", mod(fmt.Sprintf("%f", ns.Server.State.Load1)),
-			"#SERVER.LOAD5#", mod(fmt.Sprintf("%f", ns.Server.State.Load5)),
-			"#SERVER.LOAD15#", mod(fmt.Sprintf("%f", ns.Server.State.Load15)),
-			"#SERVER.TCPCONNCOUNT#", mod(fmt.Sprintf("%d", ns.Server.State.TcpConnCount)),
-			"#SERVER.UDPCONNCOUNT#", mod(fmt.Sprintf("%d", ns.Server.State.UdpConnCount)),
 		)
 
-		var ipv4, ipv6, validIP string
-		ip := ns.Server.GeoIP.IP
-		if ip.IPv4Addr != "" && ip.IPv6Addr != "" {
-			ipv4 = ip.IPv4Addr
-			ipv6 = ip.IPv6Addr
-			validIP = ipv4
-		} else if ip.IPv4Addr != "" {
-			ipv4 = ip.IPv4Addr
-			validIP = ipv4
+		if ns.Server.State != nil && ns.Server.Host != nil {
+			replacements = append(replacements,
+				// Converted metrics
+				"#SERVER.CPU#", mod(ns.formatUsage(false, ns.Server.State.CPU)),
+				"#SERVER.MEM#", mod(ns.formatUsage(true, float64(ns.Server.State.MemUsed)/float64(ns.Server.Host.MemTotal))),
+				"#SERVER.SWAP#", mod(ns.formatUsage(true, float64(ns.Server.State.SwapUsed)/float64(ns.Server.Host.SwapTotal))),
+				"#SERVER.DISK#", mod(ns.formatUsage(true, float64(ns.Server.State.DiskUsed)/float64(ns.Server.Host.DiskTotal))),
+				"#SERVER.SPEEDIN#", mod(fmt.Sprintf("%s/s", ns.formatSize(ns.Server.State.NetInSpeed))),
+				"#SERVER.SPEEDOUT#", mod(fmt.Sprintf("%s/s", ns.formatSize(ns.Server.State.NetOutSpeed))),
+				"#SERVER.TRANSFERIN#", mod(ns.formatSize(ns.Server.State.NetInTransfer)),
+				"#SERVER.TRANSFEROUT#", mod(ns.formatSize(ns.Server.State.NetOutTransfer)),
+
+				// Raw metrics
+				"#SERVER.CPUUSED#", mod(fmt.Sprintf("%f", ns.Server.State.CPU)),
+				"#SERVER.MEMUSED#", mod(fmt.Sprintf("%d", ns.Server.State.MemUsed)),
+				"#SERVER.SWAPUSED#", mod(fmt.Sprintf("%d", ns.Server.State.SwapUsed)),
+				"#SERVER.DISKUSED#", mod(fmt.Sprintf("%d", ns.Server.State.DiskUsed)),
+				"#SERVER.NETINSPEED#", mod(fmt.Sprintf("%d", ns.Server.State.NetInSpeed)),
+				"#SERVER.NETOUTSPEED#", mod(fmt.Sprintf("%d", ns.Server.State.NetOutSpeed)),
+				"#SERVER.TRANSFERINRAW#", mod(fmt.Sprintf("%d", ns.Server.State.NetInTransfer)),
+				"#SERVER.TRANSFEROUTRAW#", mod(fmt.Sprintf("%d", ns.Server.State.NetOutTransfer)),
+				"#SERVER.UPTIME#", mod(fmt.Sprintf("%d", ns.Server.State.Uptime)),
+				"#SERVER.MEMTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.MemTotal)),
+				"#SERVER.SWAPTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.SwapTotal)),
+				"#SERVER.DISKTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.DiskTotal)),
+				"#SERVER.LOAD1#", mod(fmt.Sprintf("%f", ns.Server.State.Load1)),
+				"#SERVER.LOAD5#", mod(fmt.Sprintf("%f", ns.Server.State.Load5)),
+				"#SERVER.LOAD15#", mod(fmt.Sprintf("%f", ns.Server.State.Load15)),
+				"#SERVER.TCPCONNCOUNT#", mod(fmt.Sprintf("%d", ns.Server.State.TcpConnCount)),
+				"#SERVER.UDPCONNCOUNT#", mod(fmt.Sprintf("%d", ns.Server.State.UdpConnCount)),
+			)
 		} else {
-			ipv6 = ip.IPv6Addr
-			validIP = ipv6
+			replacements = append(replacements,
+				"#SERVER.CPU#", mod("N/A"),
+				"#SERVER.MEM#", mod("N/A"),
+				"#SERVER.SWAP#", mod("N/A"),
+				"#SERVER.DISK#", mod("N/A"),
+				"#SERVER.SPEEDIN#", mod("N/A"),
+				"#SERVER.SPEEDOUT#", mod("N/A"),
+				"#SERVER.TRANSFERIN#", mod("N/A"),
+				"#SERVER.TRANSFEROUT#", mod("N/A"),
+				"#SERVER.CPUUSED#", mod("0"),
+				"#SERVER.MEMUSED#", mod("0"),
+				"#SERVER.SWAPUSED#", mod("0"),
+				"#SERVER.DISKUSED#", mod("0"),
+				"#SERVER.NETINSPEED#", mod("0"),
+				"#SERVER.NETOUTSPEED#", mod("0"),
+				"#SERVER.TRANSFERINRAW#", mod("0"),
+				"#SERVER.TRANSFEROUTRAW#", mod("0"),
+				"#SERVER.UPTIME#", mod("0"),
+				"#SERVER.MEMTOTAL#", mod("0"),
+				"#SERVER.SWAPTOTAL#", mod("0"),
+				"#SERVER.DISKTOTAL#", mod("0"),
+				"#SERVER.LOAD1#", mod("0"),
+				"#SERVER.LOAD5#", mod("0"),
+				"#SERVER.LOAD15#", mod("0"),
+				"#SERVER.TCPCONNCOUNT#", mod("0"),
+				"#SERVER.UDPCONNCOUNT#", mod("0"),
+			)
+		}
+
+		var ipv4, ipv6, validIP string
+		if ns.Server.GeoIP != nil {
+			ip := ns.Server.GeoIP.IP
+			if ip.IPv4Addr != "" && ip.IPv6Addr != "" {
+				ipv4 = ip.IPv4Addr
+				ipv6 = ip.IPv6Addr
+				validIP = ipv4
+			} else if ip.IPv4Addr != "" {
+				ipv4 = ip.IPv4Addr
+				validIP = ipv4
+			} else {
+				ipv6 = ip.IPv6Addr
+				validIP = ipv6
+			}
 		}
 
 		replacements = append(replacements,

@@ -405,6 +405,8 @@ func CronJobForDomainStatus() {
 		var err error
 		if len(endDateStr) == 10 { // YYYY-MM-DD
 			endDate, err = time.Parse("2006-01-02", endDateStr)
+		} else if len(endDateStr) == 19 && endDateStr[10] == ' ' { // YYYY-MM-DD HH:MM:SS
+			endDate, err = time.Parse("2006-01-02 15:04:05", endDateStr)
 		} else {
 			endDate, err = time.Parse(time.RFC3339, endDateStr)
 		}
@@ -487,12 +489,19 @@ func CronJobForServerStatus() {
 			continue
 		}
 
+		// 忽略前端默认生成的空日期
+		if strings.HasPrefix(pn.BillingDataMod.EndDate, "0000-00-00") {
+			continue
+		}
+
 		// 处理类似 2026-10-10 甚至其他不带时区的格式
 		endDateStr := pn.BillingDataMod.EndDate
 		var endDate time.Time
 		var err error
 		if len(endDateStr) == 10 { // YYYY-MM-DD
 			endDate, err = time.Parse("2006-01-02", endDateStr)
+		} else if len(endDateStr) == 19 && endDateStr[10] == ' ' { // YYYY-MM-DD HH:MM:SS
+			endDate, err = time.Parse("2006-01-02 15:04:05", endDateStr)
 		} else {
 			endDate, err = time.Parse(time.RFC3339, endDateStr)
 		}

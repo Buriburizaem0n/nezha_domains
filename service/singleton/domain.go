@@ -399,7 +399,16 @@ func CronJobForDomainStatus() {
 			continue
 		}
 
-		endDate, err := time.Parse(time.RFC3339, billing.EndDate)
+		// 处理类似 2026-10-10 甚至其他不带时区的格式
+		endDateStr := billing.EndDate
+		var endDate time.Time
+		var err error
+		if len(endDateStr) == 10 { // YYYY-MM-DD
+			endDate, err = time.Parse("2006-01-02", endDateStr)
+		} else {
+			endDate, err = time.Parse(time.RFC3339, endDateStr)
+		}
+
 		if err != nil {
 			log.Printf("NEZHA>> Cron::Error parsing end date for domain %s: %v", d.Domain, err)
 			continue
@@ -466,21 +475,30 @@ func CronJobForServerStatus() {
 
 	for i := range servers {
 		s := servers[i]
-		if s.BillingData == nil {
+		var pn struct {
+			BillingDataMod struct {
+				EndDate string `json:"endDate"`
+			} `json:"billingDataMod"`
+		}
+		if s.PublicNote != "" {
+			_ = json.Unmarshal([]byte(s.PublicNote), &pn)
+		}
+		if pn.BillingDataMod.EndDate == "" {
 			continue
 		}
 
-		var billing model.BillingDataMod
-		if err := json.Unmarshal(s.BillingData, &billing); err != nil {
-			continue
+		// 处理类似 2026-10-10 甚至其他不带时区的格式
+		endDateStr := pn.BillingDataMod.EndDate
+		var endDate time.Time
+		var err error
+		if len(endDateStr) == 10 { // YYYY-MM-DD
+			endDate, err = time.Parse("2006-01-02", endDateStr)
+		} else {
+			endDate, err = time.Parse(time.RFC3339, endDateStr)
 		}
 
-		if billing.EndDate == "" {
-			continue
-		}
-
-		endDate, err := time.Parse(time.RFC3339, billing.EndDate)
 		if err != nil {
+			log.Printf("NEZHA>> Cron::Error parsing end date for VPS %s: %v", s.Name, err)
 			continue
 		}
 

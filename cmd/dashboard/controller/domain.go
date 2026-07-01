@@ -140,5 +140,8 @@ func SyncDomainWHOIS(c *gin.Context) (any, error) {
 
 func SyncAllDomains(c *gin.Context) (any, error) {
 	singleton.SyncAllDomains()
+	// 手动触发到期检查，方便调试
+	singleton.CronJobForDomainStatus()
+	singleton.CronJobForServerStatus()
 	return nil, nil
 }

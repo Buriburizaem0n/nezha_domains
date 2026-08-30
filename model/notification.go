@@ -143,7 +143,6 @@ func (ns *NotificationServerBundle) Send(message string) error {
 
 	verifyTLS := n.VerifyTLS != nil && *n.VerifyTLS
 
-
 	reqBody, err := ns.reqBody(message)
 	if err != nil {
 		return err
@@ -307,33 +306,6 @@ func (ns *NotificationServerBundle) replaceParamsInString(str string, message st
 				"#SERVER.UDPCONNCOUNT#", mod("0"),
 			)
 		}
-
-		var ipv4, ipv6, validIP string
-		if ns.Server.GeoIP != nil {
-			ip := ns.Server.GeoIP.IP
-			if ip.IPv4Addr != "" && ip.IPv6Addr != "" {
-				ipv4 = ip.IPv4Addr
-				ipv6 = ip.IPv6Addr
-				validIP = ipv4
-			} else if ip.IPv4Addr != "" {
-				ipv4 = ip.IPv4Addr
-				validIP = ipv4
-			} else {
-				ipv6 = ip.IPv6Addr
-				validIP = ipv6
-			}
-		}
-
-		replacements = append(replacements,
-			"#SERVER.IP#", mod(validIP),
-			"#SERVER.IPV4#", mod(ipv4),
-			"#SERVER.IPV6#", mod(ipv6),
-		)
-	}
-
-	replacer := strings.NewReplacer(replacements...)
-	return replacer.Replace(str)
-}
 
 		var ipv4, ipv6, validIP string
 		if ns.Server.GeoIP != nil {

@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/goccy/go-json"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
 	pb "github.com/nezhahq/nezha/proto"
@@ -21,15 +20,15 @@ var runtimeHolderInitMu sync.Mutex
 type Server struct {
 	Common
 
-	Name                   string `json:"name"`
-	UUID                   string `json:"uuid,omitempty" gorm:"unique"`
-	Note                   string `json:"note,omitempty"`           // 管理员可见备注
-	PublicNote             string `json:"public_note,omitempty"`    // 公开备注
-	DisplayIndex           int    `json:"display_index"`            // 展示排序，越大越靠前
-	HideForGuest           bool   `json:"hide_for_guest,omitempty"` // 对游客隐藏
-	EnableDDNS             bool   `json:"enable_ddns,omitempty"`    // 启用DDNS
-	BillingData            datatypes.JSON `gorm:"type:json" json:"billing_data,omitempty"`
-	DDNSProfilesRaw        string `gorm:"default:'[]';column:ddns_profiles_raw" json:"-"`
+	Name            string `json:"name"`
+	UUID            string `json:"uuid,omitempty" gorm:"unique"`
+	Note            string `json:"note,omitempty"`           // 管理员可见备注
+	PublicNote      string `json:"public_note,omitempty"`    // 公开备注
+	DisplayIndex    int    `json:"display_index"`            // 展示排序，越大越靠前
+	HideForGuest    bool   `json:"hide_for_guest,omitempty"` // 对游客隐藏
+	EnableDDNS      bool   `json:"enable_ddns,omitempty"`    // 启用DDNS
+	DDNSProfilesRaw string `gorm:"default:'[]';column:ddns_profiles_raw" json:"-"`
+
 	OverrideDDNSDomainsRaw string `gorm:"default:'{}';column:override_ddns_domains_raw" json:"-"`
 
 	DDNSProfiles        []uint64            `gorm:"-" json:"ddns_profiles,omitempty" validate:"optional"` // DDNS配置

@@ -47,12 +47,13 @@ func GetDomainList(c *gin.Context) (any, error) {
 		if d.BillingData != nil {
 			var billing model.BillingDataMod
 			if json.Unmarshal(d.BillingData, &billing) == nil && billing.EndDate != "" {
-				if endDate, err := time.Parse(time.RFC3339, billing.EndDate); err == nil {
+				if endDate, err := singleton.ParseFlexibleDate(billing.EndDate); err == nil {
 					daysLeft := int(time.Until(endDate).Hours() / 24)
 					apiDomain.ExpiresInDays = &daysLeft
 				}
 			}
 		}
+
 		response = append(response, apiDomain)
 	}
 

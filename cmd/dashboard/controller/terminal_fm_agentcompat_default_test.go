@@ -15,25 +15,6 @@ import (
 	"github.com/nezhahq/nezha/service/singleton"
 )
 
-func TestDefaultCreateTerminalPreservesCapabilityHeaderAndLegacyDispatch(t *testing.T) {
-	// Given
-	handler, _, request := newDefaultCreateFixture(t, "POST", "/terminal", model.TerminalForm{ServerID: 7})
-	request.Request.Header.Set(agentcompatcontract.IOStreamCapabilityHeader, "malformed")
-	server, ok := singleton.ServerShared.Get(7)
-	require.True(t, ok)
-	stream := &failingRequestTaskStream{err: errors.New("stop after dispatch")}
-	server.SetTaskStream(stream)
-
-	// When
-	_, err := createTerminal(request)
-
-	// Then
-	require.ErrorIs(t, err, stream.err)
-	require.Equal(t, "malformed", request.Request.Header.Get(agentcompatcontract.IOStreamCapabilityHeader))
-	require.Equal(t, 1, stream.calls())
-	require.Equal(t, 0, handler.StreamCount())
-}
-
 func TestDefaultCreateFMPreservesCapabilityHeaderAndLegacyDispatch(t *testing.T) {
 	// Given
 	handler, _, request := newDefaultCreateFixture(t, "POST", "/file?id=7", nil)

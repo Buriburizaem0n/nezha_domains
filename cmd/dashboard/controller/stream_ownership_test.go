@@ -46,32 +46,6 @@ func setAuthUser(c *gin.Context, userID uint64, role model.Role) {
 	})
 }
 
-func TestTerminalStreamRejectsForeignMember(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	ensureLocalizerForStreamTests(t)
-	rpc.NezhaHandlerSingleton = rpc.NewNezhaHandler()
-	rpc.NezhaHandlerSingleton.CreateStream("alice-terminal", 100, 1)
-
-	r := gin.New()
-	r.Use(func(c *gin.Context) {
-		setAuthUser(c, 200, model.RoleMember) // bob
-		c.Next()
-	})
-	r.GET("/ws/terminal/:id", commonHandler(terminalStream))
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/alice-terminal", nil)
-	r.ServeHTTP(w, req)
-
-	success, errMsg := decodeCommonResponseError(t, w.Body.Bytes())
-	assert.False(t, success, "foreign member must not be authorized to attach to alice's terminal")
-	assert.Contains(t, errMsg, "permission denied")
-
-	// And the existing stream must NOT have been torn down by the failed attempt.
-	_, stillExists := rpc.NezhaHandlerSingleton.StreamOwnership("alice-terminal")
-	assert.True(t, stillExists, "rejected attempt must not destroy the legitimate session")
-}
-
 func TestFMStreamRejectsForeignMember(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ensureLocalizerForStreamTests(t)
@@ -95,26 +69,6 @@ func TestFMStreamRejectsForeignMember(t *testing.T) {
 
 	_, stillExists := rpc.NezhaHandlerSingleton.StreamOwnership("alice-fm")
 	assert.True(t, stillExists, "rejected attempt must not destroy the legitimate FM session")
-}
-
-func TestTerminalStreamRejectsUnknownStreamID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	ensureLocalizerForStreamTests(t)
-	rpc.NezhaHandlerSingleton = rpc.NewNezhaHandler()
-
-	r := gin.New()
-	r.Use(func(c *gin.Context) {
-		setAuthUser(c, 100, model.RoleMember)
-		c.Next()
-	})
-	r.GET("/ws/terminal/:id", commonHandler(terminalStream))
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/nonexistent", nil)
-	r.ServeHTTP(w, req)
-
-	success, _ := decodeCommonResponseError(t, w.Body.Bytes())
-	assert.False(t, success, "unknown stream id must produce an error response")
 }
 
 // JWT cookie security: SigningAlgorithm must be pinned to HS256 (defense

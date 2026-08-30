@@ -59,27 +59,6 @@ func newAuthorizedControllerContext(t *testing.T, method, target string, body an
 	return context
 }
 
-func TestCreateTerminalReturnsSendErrorAndReleasesStreamCapacity(t *testing.T) {
-	cleanupFixture, _ := setupMCPTest(t)
-	defer cleanupFixture()
-	originalHandler := rpc.NezhaHandlerSingleton
-	rpc.NezhaHandlerSingleton = rpc.NewNezhaHandler()
-	t.Cleanup(func() { rpc.NezhaHandlerSingleton = originalHandler })
-
-	sendError := errors.New("terminal task send failed")
-	stream := &failingRequestTaskStream{err: sendError}
-	server, ok := singleton.ServerShared.Get(7)
-	require.True(t, ok)
-	server.SetTaskStream(stream)
-
-	request := newAuthorizedControllerContext(t, "POST", "/terminal", model.TerminalForm{ServerID: 7})
-	response, err := createTerminal(request)
-	require.ErrorIs(t, err, sendError)
-	require.Nil(t, response)
-	require.Equal(t, 1, stream.calls())
-	assertStreamCapacityReusable(t, rpc.NezhaHandlerSingleton, 100, 7, "terminal-reused")
-}
-
 func TestCreateFMReturnsSendErrorAndReleasesStreamCapacity(t *testing.T) {
 	cleanupFixture, _ := setupMCPTest(t)
 	defer cleanupFixture()

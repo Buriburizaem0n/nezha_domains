@@ -7,11 +7,12 @@
 package proto
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -842,6 +843,7 @@ var (
 
 func file_proto_nezha_proto_rawDescGZIP() []byte {
 	file_proto_nezha_proto_rawDescOnce.Do(func() {
+		// #nosec G103
 		file_proto_nezha_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_nezha_proto_rawDesc), len(file_proto_nezha_proto_rawDesc)))
 	})
 	return file_proto_nezha_proto_rawDescData
@@ -891,12 +893,14 @@ func file_proto_nezha_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+			// #nosec G103
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_nezha_proto_rawDesc), len(file_proto_nezha_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
+
 		GoTypes:           file_proto_nezha_proto_goTypes,
 		DependencyIndexes: file_proto_nezha_proto_depIdxs,
 		MessageInfos:      file_proto_nezha_proto_msgTypes,

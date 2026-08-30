@@ -35,14 +35,14 @@ const (
 )
 
 type ConfigForGuests struct {
-	Language            string `koanf:"language" json:"language"` // 系统语言，默认 zh_CN
-	SiteName            string `koanf:"site_name" json:"site_name"`
-	CustomCode          string `koanf:"custom_code" json:"custom_code,omitempty"`
-	CustomCodeDashboard string `koanf:"custom_code_dashboard" json:"custom_code_dashboard,omitempty"`
-	CustomLogo          string `koanf:"custom_logo" json:"custom_logo,omitempty"`
-	CustomDescription   string `koanf:"custom_description" json:"custom_description,omitempty"`
-	CustomLinks         string `koanf:"custom_links" json:"custom_links,omitempty"`
-	BackgroundImageDay  string `koanf:"background_image_day" json:"background_image_day,omitempty"`
+	Language             string `koanf:"language" json:"language"` // 系统语言，默认 zh_CN
+	SiteName             string `koanf:"site_name" json:"site_name"`
+	CustomCode           string `koanf:"custom_code" json:"custom_code,omitempty"`
+	CustomCodeDashboard  string `koanf:"custom_code_dashboard" json:"custom_code_dashboard,omitempty"`
+	CustomLogo           string `koanf:"custom_logo" json:"custom_logo,omitempty"`
+	CustomDescription    string `koanf:"custom_description" json:"custom_description,omitempty"`
+	CustomLinks          string `koanf:"custom_links" json:"custom_links,omitempty"`
+	BackgroundImageDay   string `koanf:"background_image_day" json:"background_image_day,omitempty"`
 	BackgroundImageNight string `koanf:"background_image_night" json:"background_image_night,omitempty"`
 }
 
@@ -65,7 +65,7 @@ type ConfigDashboard struct {
 	UserTemplate      string `koanf:"user_template" json:"user_template,omitempty"`
 	AdminTemplate     string `koanf:"admin_template" json:"admin_template,omitempty"`
 
-	EnablePlainIPInNotification bool   `koanf:"enable_plain_ip_in_notification" json:"enable_plain_ip_in_notification,omitempty"` // 通知信息IP不打码
+	EnablePlainIPInNotification bool `koanf:"enable_plain_ip_in_notification" json:"enable_plain_ip_in_notification,omitempty"` // 通知信息IP不打码
 
 	EnableMCP bool `koanf:"enable_mcp" json:"enable_mcp,omitempty"` // 是否启用 MCP 入口（默认关闭；启用前请审视 PAT scope/whitelist）
 
@@ -80,15 +80,15 @@ type ConfigDashboard struct {
 	Cover                       uint8  `koanf:"cover" json:"cover"`                                               // 覆盖范围（0:提醒未被 IgnoredIPNotification 包含的所有服务器; 1:仅提醒被 IgnoredIPNotification 包含的服务器;）
 	IgnoredIPNotification       string `koanf:"ignored_ip_notification" json:"ignored_ip_notification,omitempty"` // 特定服务器IP（多个服务器用逗号分隔）
 
-	DNSServers                  string `koanf:"dns_servers" json:"dns_servers,omitempty"`
-	ExpiryNotificationGroupID   uint64 `koanf:"expiry_notification_group_id" json:"expiry_notification_group_id,omitempty"`
-	TelegramBotToken            string `koanf:"telegram_bot_token" json:"telegram_bot_token,omitempty"`
-	TelegramAdminChatID         string `koanf:"telegram_admin_chat_id" json:"telegram_admin_chat_id,omitempty"`
+	DNSServers                string `koanf:"dns_servers" json:"dns_servers,omitempty"`
+	ExpiryNotificationGroupID uint64 `koanf:"expiry_notification_group_id" json:"expiry_notification_group_id,omitempty"`
+	TelegramBotToken          string `koanf:"telegram_bot_token" json:"telegram_bot_token,omitempty"`
+	TelegramAdminChatID       string `koanf:"telegram_admin_chat_id" json:"telegram_admin_chat_id,omitempty"`
 
-	SMTPServer                  string `koanf:"smtp_server" json:"smtp_server,omitempty"`
-	SMTPUser                    string `koanf:"smtp_user" json:"smtp_user,omitempty"`
-	SMTPPassword                string `koanf:"smtp_password" json:"smtp_password,omitempty"`
-	AdminEmail                  string `koanf:"admin_email" json:"admin_email,omitempty"`
+	SMTPServer                   string `koanf:"smtp_server" json:"smtp_server,omitempty"`
+	SMTPUser                     string `koanf:"smtp_user" json:"smtp_user,omitempty"`
+	SMTPPassword                 string `koanf:"smtp_password" json:"smtp_password,omitempty"`
+	AdminEmail                   string `koanf:"admin_email" json:"admin_email,omitempty"`
 	DomainExpiryNotificationDays string `koanf:"domain_expiry_notification_days" json:"domain_expiry_notification_days,omitempty"`
 	ServerExpiryNotificationDays string `koanf:"server_expiry_notification_days" json:"server_expiry_notification_days,omitempty"`
 }
@@ -397,8 +397,9 @@ func koanfConf(c any) koanf.UnmarshalConf {
 			WeaklyTypedInput: true,
 			MatchName: func(mapKey, fieldName string) bool {
 				return strings.EqualFold(mapKey, fieldName) ||
-					strings.EqualFold(mapKey, strings.ReplaceAll(fieldName, "_", ""))
+					strings.EqualFold(strings.ReplaceAll(mapKey, "_", ""), strings.ReplaceAll(fieldName, "_", ""))
 			},
+
 			Squash: true,
 		},
 	}

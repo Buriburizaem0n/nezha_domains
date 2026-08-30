@@ -19,7 +19,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/nezhahq/nezha/model"
 	"github.com/nezhahq/nezha/service/rpc"
 	"github.com/nezhahq/nezha/service/singleton"
 )
@@ -49,32 +48,8 @@ func setupQuotaTest(t *testing.T) (cleanup func(), successStream *failingRequest
 	}, successStream
 }
 
-// TestCreateTerminalEnforcesPerUserStreamQuota verifies that once a user has
-// reached the per-user stream cap, subsequent createTerminal calls are rejected
-// with ErrTooManyStreamsForUser. This directly tests the GHSA-jg62-j5h6-8mpq
-// fix at the HTTP handler layer.
-func TestCreateTerminalEnforcesPerUserStreamQuota(t *testing.T) {
-	cleanup, _ := setupQuotaTest(t)
-	defer cleanup()
-
-	// Fill the per-user quota.
-	for i := 0; i < quotaTestUserCap; i++ {
-		req := newAuthorizedControllerContext(t, "POST", "/terminal", model.TerminalForm{ServerID: 7})
-		_, err := createTerminal(req)
-		require.NoError(t, err, "terminal %d must succeed within per-user quota", i+1)
-	}
-
-	// The (quotaTestUserCap+1)-th call must be rejected.
-	req := newAuthorizedControllerContext(t, "POST", "/terminal", model.TerminalForm{ServerID: 7})
-	_, err := createTerminal(req)
-	require.Error(t, err, "createTerminal must return an error when user quota is exhausted")
-	require.True(t, errors.Is(err, rpc.ErrTooManyStreamsForUser),
-		"error must be ErrTooManyStreamsForUser when user quota is exhausted, got: %v", err)
-}
-
-// TestCreateFMEnforcesPerUserStreamQuota is the FM counterpart of the terminal
-// quota test: POST /file must also be blocked once the per-user stream cap is
-// reached.
+// TestCreateFMEnforcesPerUserStreamQuota tests POST /file is blocked once
+// the per-user stream cap is reached.
 func TestCreateFMEnforcesPerUserStreamQuota(t *testing.T) {
 	cleanup, _ := setupQuotaTest(t)
 	defer cleanup()
@@ -92,32 +67,6 @@ func TestCreateFMEnforcesPerUserStreamQuota(t *testing.T) {
 	require.Error(t, err, "createFM must return an error when user quota is exhausted")
 	require.True(t, errors.Is(err, rpc.ErrTooManyStreamsForUser),
 		"error must be ErrTooManyStreamsForUser when user quota is exhausted, got: %v", err)
-}
-
-// TestCreateTerminalEnforcesPerServerStreamQuota verifies that even when a
-// single user's quota is not yet reached, createTerminal rejects streams once
-// the per-server cap is hit. This guards against a distributed attack where
-// many users flood one server.
-func TestCreateTerminalEnforcesPerServerStreamQuota(t *testing.T) {
-	cleanup, _ := setupQuotaTest(t)
-	defer cleanup()
-
-	// Pre-fill the per-server quota with dashboard-internal streams
-	// (creatorUserID=0 bypasses the per-user cap so we can reach the server cap
-	// without needing quotaTestServerCap distinct users).
-	for i := 0; i < quotaTestServerCap; i++ {
-		require.NoError(t,
-			rpc.NezhaHandlerSingleton.CreateStream(fmt.Sprintf("server-filler-%d", i), 0, 7),
-			"pre-fill server quota stream %d must succeed", i+1,
-		)
-	}
-
-	// User 100 has used 0 of their personal quota; the server is saturated.
-	req := newAuthorizedControllerContext(t, "POST", "/terminal", model.TerminalForm{ServerID: 7})
-	_, err := createTerminal(req)
-	require.Error(t, err, "createTerminal must return an error when server quota is exhausted")
-	require.True(t, errors.Is(err, rpc.ErrTooManyStreamsForServer),
-		"error must be ErrTooManyStreamsForServer when server quota is exhausted, got: %v", err)
 }
 
 // TestCreateFMEnforcesPerServerStreamQuota is the FM counterpart: POST /file

@@ -42,12 +42,15 @@ func serveAgentBinary(c *gin.Context) {
 	// In a real scenario, you might want to cache this or use a specific version
 	zipUrl := fmt.Sprintf("https://github.com/%s/releases/latest/download/nezha-agent_%s_%s.zip", repo, osType, arch)
 
+	// #nosec G107
 	resp, err := http.Get(zipUrl)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		// Try Gitee if GitHub fails
 		zipUrl = fmt.Sprintf("https://gitee.com/naibahq/agent/releases/latest/download/nezha-agent_%s_%s.zip", osType, arch)
+		// #nosec G107
 		resp, err = http.Get(zipUrl)
 		if err != nil || resp.StatusCode != http.StatusOK {
+
 			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to fetch agent binary from upstream"})
 			return
 		}

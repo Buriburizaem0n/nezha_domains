@@ -120,10 +120,11 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	// 资源族划分：
 	//   - nezha:inventory:* —— 对“服务器台账”的枚举与删除（列出 server / server-group、
 	//     删除 server / server-group）。这是管理后台清单管理动作。
-	//   - nezha:server:*    —— 对已知 server 的运行态操作（文件读写、编辑配置、
-	//     force-update、batch-move）。（Web Terminal 按安全要求已移除）
+	auth.POST("/terminal", restScopeMiddleware(model.ScopeServerExec), commonHandler(createTerminal))
+	auth.GET("/ws/terminal/:id", restScopeMiddleware(model.ScopeServerExec), commonHandler(terminalStream))
 	auth.POST("/file", restScopeAllOf(model.ScopeServerRead, model.ScopeServerWrite, model.ScopeServerDelete), commonHandler(createFM))
 	auth.GET("/ws/file/:id", restScopeAllOf(model.ScopeServerRead, model.ScopeServerWrite, model.ScopeServerDelete), commonHandler(fmStream))
+
 	auth.GET("/server", restScopeMiddleware(model.ScopeInventoryRead), listHandler(listServer))
 	auth.PATCH("/server/:id", restScopeMiddleware(model.ScopeServerWrite), commonHandler(updateServer))
 	auth.GET("/server/config/:id", restScopeMiddleware(serverConfigSensitiveScope()), commonHandler(getServerConfig))
@@ -140,7 +141,6 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	auth.POST("/transfer/:id/cancel", restScopeMiddleware(model.ScopeTransferWrite), commonHandler(cancelServerTransfer))
 	auth.POST("/transfer/:id/retry", restScopeMiddleware(model.ScopeTransferWrite), commonHandler(retryServerTransfer))
 	auth.GET("/ws/transfer", restScopeMiddleware(model.ScopeTransferRead), commonHandler(transferStream))
-
 
 	// service monitor
 	auth.GET("/service/list", restScopeMiddleware(model.ScopeServiceRead), listHandler(listService))

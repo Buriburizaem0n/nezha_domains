@@ -12,8 +12,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"github.com/nezhahq/nezha/cmd/dashboard/controller/waf"
 	"github.com/nezhahq/nezha/model"
+
 	"github.com/nezhahq/nezha/pkg/idcodec"
 	"github.com/nezhahq/nezha/pkg/utils"
 	"github.com/nezhahq/nezha/service/singleton"
@@ -130,8 +130,6 @@ func identityHandler() func(c *gin.Context) any {
 		}
 		claimUID, err := idcodec.Decode(encodedUID)
 		if err != nil {
-			realIP := c.GetString(model.CtxKeyRealIPStr)
-			model.BlockIP(singleton.DB, realIP, model.WAFBlockReasonTypeBruteForceToken, model.BlockIDToken)
 			return nil
 		}
 
@@ -147,10 +145,9 @@ func identityHandler() func(c *gin.Context) any {
 			return nil
 		}
 		if claimUID != sess.UserID {
-			realIP := c.GetString(model.CtxKeyRealIPStr)
-			model.BlockIP(singleton.DB, realIP, model.WAFBlockReasonTypeBruteForceToken, model.BlockIDToken)
 			return nil
 		}
+
 		currentIP := c.GetString(model.CtxKeyRealIPStr)
 		if sess.IP != currentIP {
 			c.Set(model.CtxKeyIsIPMismatch, true)
@@ -265,42 +262,37 @@ func fallbackAuthMiddleware(mw *jwt.GinJWTMiddleware) func(c *gin.Context) {
 	return func(c *gin.Context) {
 		claims, err := mw.GetClaimsFromJWT(c)
 		if err != nil {
+			c.Next()
 			return
 		}
 
 		switch v := claims["exp"].(type) {
 		case nil:
+			c.Next()
 			return
 		case float64:
 			if int64(v) < mw.TimeFunc().Unix() {
+				c.Next()
 				return
 			}
 		case json.Number:
 			n, err := v.Int64()
-			if err != nil {
-				return
-			}
-			if n < mw.TimeFunc().Unix() {
+			if err != nil || n < mw.TimeFunc().Unix() {
+				c.Next()
 				return
 			}
 		default:
+			c.Next()
 			return
 		}
-
-		realIP := c.GetString(model.CtxKeyRealIPStr)
 
 		c.Set("JWT_PAYLOAD", claims)
 		identity := mw.IdentityHandler(c)
 
 		if identity != nil {
+			realIP := c.GetString(model.CtxKeyRealIPStr)
 			model.UnblockIP(singleton.DB, realIP, model.BlockIDToken)
 			c.Set(mw.IdentityKey, identity)
-		} else {
-			isIpMismatch := c.GetBool(model.CtxKeyIsIPMismatch)
-			if !isIpMismatch {
-				waf.ShowBlockPage(c, model.BlockIP(singleton.DB, realIP, model.WAFBlockReasonTypeBruteForceToken, model.BlockIDToken))
-				return
-			}
 		}
 
 		c.Next()

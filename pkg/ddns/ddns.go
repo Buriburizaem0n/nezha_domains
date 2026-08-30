@@ -119,17 +119,32 @@ func (provider *Provider) splitDomainSOA(ctx context.Context, domain string) (pr
 				continue
 			}
 
-			if len(r.Answer) > 0 {
-				if soa, ok := r.Answer[0].(*dns.SOA); ok {
-					zone := soa.Hdr.Name
-					prefix := libdns.RelativeName(domain, zone)
-					// Convert "@" to empty string for zone apex
-					if prefix == "@" {
-						prefix = ""
-					}
-					return prefix, zone, nil
+			var soaRecord *dns.SOA
+			for _, ans := range r.Answer {
+				if soa, ok := ans.(*dns.SOA); ok {
+					soaRecord = soa
+					break
 				}
 			}
+			if soaRecord == nil {
+				for _, ns := range r.Ns {
+					if soa, ok := ns.(*dns.SOA); ok {
+						soaRecord = soa
+						break
+					}
+				}
+			}
+
+			if soaRecord != nil {
+				zone := soaRecord.Hdr.Name
+				prefix := libdns.RelativeName(domain, zone)
+				// Convert "@" to empty string for zone apex
+				if prefix == "@" {
+					prefix = ""
+				}
+				return prefix, zone, nil
+			}
+
 		}
 	}
 

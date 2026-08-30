@@ -36,7 +36,23 @@ func TestReadConfig(t *testing.T) {
 	})
 
 	t.Run("ReadFile", func(t *testing.T) {
-		const testCfg = "jwt_secret_key: test\nuser_template: um\nadmin_template: am\nagent_secret_key: none\nsite_name: lowkick"
+		const testCfg = `
+jwt_secret_key: test
+user_template: um
+admin_template: am
+agent_secret_key: none
+site_name: lowkick
+telegram_bot_token: 8155880635:AAH_test
+telegram_admin_chat_id: "12345678"
+web_real_ip_header: nz-realip
+agent_real_ip_header: nz-realip
+domain_expiry_notification_days: 100, 30, 7, 1, 0
+server_expiry_notification_days: 30, 7, 3, 1, 0
+smtp_server: us1.workspace.org:465
+smtp_user: test@loohui.com
+smtp_password: password123
+admin_email: admin@loohui.com
+`
 
 		var testFrontendTemplates = []FrontendTemplate{
 			{Path: "um"},
@@ -59,6 +75,16 @@ func TestReadConfig(t *testing.T) {
 			{"admin_template", c.AdminTemplate, c.AdminTemplate == "am"},
 			{"agent_secret_key", c.AgentSecretKey, c.AgentSecretKey == "none"},
 			{"site_name", c.SiteName, c.SiteName == "lowkick"},
+			{"telegram_bot_token", c.TelegramBotToken, c.TelegramBotToken == "8155880635:AAH_test"},
+			{"telegram_admin_chat_id", c.TelegramAdminChatID, c.TelegramAdminChatID == "12345678"},
+			{"web_real_ip_header", c.WebRealIPHeader, c.WebRealIPHeader == "nz-realip"},
+			{"agent_real_ip_header", c.AgentRealIPHeader, c.AgentRealIPHeader == "nz-realip"},
+			{"domain_expiry_notification_days", c.DomainExpiryNotificationDays, c.DomainExpiryNotificationDays == "100, 30, 7, 1, 0"},
+			{"server_expiry_notification_days", c.ServerExpiryNotificationDays, c.ServerExpiryNotificationDays == "30, 7, 3, 1, 0"},
+			{"smtp_server", c.SMTPServer, c.SMTPServer == "us1.workspace.org:465"},
+			{"smtp_user", c.SMTPUser, c.SMTPUser == "test@loohui.com"},
+			{"smtp_password", c.SMTPPassword, c.SMTPPassword == "password123"},
+			{"admin_email", c.AdminEmail, c.AdminEmail == "admin@loohui.com"},
 		}
 
 		for _, field := range testFields {

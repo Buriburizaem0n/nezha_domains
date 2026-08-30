@@ -132,7 +132,6 @@ func updateNotification(c *gin.Context) (any, error) {
 	formatMetricUnits := nf.FormatMetricUnits
 	n.FormatMetricUnits = &formatMetricUnits
 
-
 	// 凭据在列表接口已脱敏，前端无法回填；空值视为"不修改"，保留旧值避免误清空。
 	if nf.URL != "" {
 		n.URL = nf.URL

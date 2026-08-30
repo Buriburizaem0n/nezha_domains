@@ -22,7 +22,6 @@ import (
 	whoisparser "github.com/likexian/whois-parser"
 )
 
-
 // SyncDomainPrice 从 哪煮米(nazhumi.com) 获取域名续费价格
 func SyncDomainPrice(billing *model.BillingDataMod, domainName string) {
 	// 获取 TLD
@@ -35,7 +34,7 @@ func SyncDomainPrice(billing *model.BillingDataMod, domainName string) {
 	// 匹配注册商代码 (简单启示式匹配)
 	registrarCode := ""
 	regNameLower := strings.ToLower(billing.Registrar)
-	
+
 	// 这里可以扩展更多的映射关系
 	mapping := map[string]string{
 		"aliyun": "aliyun", "tencent": "tencent", "cloudflare": "cloudflare",
@@ -350,7 +349,7 @@ func isDomainNotificationDay(daysLeft int) bool {
 	parts := strings.Split(daysStr, ",")
 	for _, p := range parts {
 		d, err := strconv.Atoi(strings.TrimSpace(p))
-		if err == nil && d == daysLeft+1 {
+		if err == nil && (d == daysLeft+1 || (d == 0 && daysLeft == 0)) {
 			return true
 		}
 	}
@@ -365,18 +364,118 @@ func isServerNotificationDay(daysLeft int) bool {
 	parts := strings.Split(daysStr, ",")
 	for _, p := range parts {
 		d, err := strconv.Atoi(strings.TrimSpace(p))
-		if err == nil && d == daysLeft+1 {
+		if err == nil && (d == daysLeft+1 || (d == 0 && daysLeft == 0)) {
 			return true
 		}
 	}
 	return false
 }
 
+func isAutoRenewal(v any) bool {
+	if v == nil {
+		return false
+	}
+	switch val := v.(type) {
+	case string:
+		s := strings.ToLower(strings.TrimSpace(val))
+		return s == "1" || s == "true" || s == "auto" || s == "yes" || s == "on"
+	case bool:
+		return val
+	case float64:
+		return val == 1
+	case int:
+		return val == 1
+	case int64:
+		return val == 1
+	}
+	return false
+}
+
+func advanceRenewalDate(startDateStr, endDateStr, cycle string, now time.Time) (newStartStr, newEndStr string, newEndDate time.Time, renewed bool) {
+	endDate, err := ParseFlexibleDate(endDateStr)
+	if err != nil || !now.After(endDate) {
+		return startDateStr, endDateStr, endDate, false
+	}
+
+	startDate, _ := ParseFlexibleDate(startDateStr)
+
+	cycleLower := strings.ToLower(strings.TrimSpace(cycle))
+	var years, months, days int
+	switch cycleLower {
+	case "day", "天", "日", "1day", "1天", "1日":
+		days = 1
+	case "week", "周", "星期", "1week", "1周":
+		days = 7
+	case "month", "月", "1month", "1月", "按月":
+		months = 1
+	case "quarter", "季", "季度", "3month", "3月", "按季":
+		months = 3
+	case "halfyear", "半年", "6month", "6月", "半年度":
+		months = 6
+	case "year", "年", "1year", "1年", "按年", "每年":
+		years = 1
+	case "2year", "2年", "两年":
+		years = 2
+	case "3year", "3年", "三年":
+		years = 3
+	case "5year", "5年", "五年":
+		years = 5
+	default:
+		if !startDate.IsZero() && endDate.After(startDate) {
+			duration := endDate.Sub(startDate)
+			curEnd := endDate
+			curStart := startDate
+			for !curEnd.After(now) {
+				curStart = curEnd
+				curEnd = curEnd.Add(duration)
+			}
+			newEndDate = curEnd
+			return formatLikeOriginal(startDateStr, curStart), formatLikeOriginal(endDateStr, curEnd), newEndDate, true
+		}
+		years = 1 // 默认按年
+	}
+
+	curEnd := endDate
+	curStart := startDate
+	for !curEnd.After(now) {
+		curStart = curEnd
+		curEnd = curEnd.AddDate(years, months, days)
+	}
+
+	newEndDate = curEnd
+	newStartStr = formatLikeOriginal(startDateStr, curStart)
+	newEndStr = formatLikeOriginal(endDateStr, curEnd)
+	return newStartStr, newEndStr, newEndDate, true
+}
+
+func formatLikeOriginal(original string, t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	if len(original) == 10 && !strings.Contains(original, "T") {
+		return t.Format("2006-01-02")
+	}
+	if len(original) == 19 && strings.Contains(original, " ") {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return t.Format(time.RFC3339)
+}
+
+// ParseFlexibleDate 解析多种日期格式 (YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, RFC3339)
+func ParseFlexibleDate(dateStr string) (time.Time, error) {
+	if len(dateStr) == 10 { // YYYY-MM-DD
+		return time.Parse("2006-01-02", dateStr)
+	} else if len(dateStr) == 19 && dateStr[10] == ' ' { // YYYY-MM-DD HH:MM:SS
+		return time.Parse("2006-01-02 15:04:05", dateStr)
+	}
+	return time.Parse(time.RFC3339, dateStr)
+}
+
 // CronJobForDomainStatus 检查域名到期和自动续费的定时任务
 func CronJobForDomainStatus() {
 	log.Println("NEZHA>> Cron::开始执行域名状态检查任务")
 	var domains []model.Domain
-	if err := DB.Where("status = ?", "verified").Find(&domains).Error; err != nil {
+	if err := DB.Find(&domains).Error; err != nil {
 		log.Printf("NEZHA>> Cron::Error fetching domains: %v", err)
 		return
 	}
@@ -399,72 +498,57 @@ func CronJobForDomainStatus() {
 			continue
 		}
 
-		// 处理类似 2026-10-10 甚至其他不带时区的格式
-		endDateStr := billing.EndDate
-		var endDate time.Time
-		var err error
-		if len(endDateStr) == 10 { // YYYY-MM-DD
-			endDate, err = time.Parse("2006-01-02", endDateStr)
-		} else if len(endDateStr) == 19 && endDateStr[10] == ' ' { // YYYY-MM-DD HH:MM:SS
-			endDate, err = time.Parse("2006-01-02 15:04:05", endDateStr)
-		} else {
-			endDate, err = time.Parse(time.RFC3339, endDateStr)
-		}
-
+		endDate, err := ParseFlexibleDate(billing.EndDate)
 		if err != nil {
 			log.Printf("NEZHA>> Cron::Error parsing end date for domain %s: %v", d.Domain, err)
 			continue
 		}
 
+		if isAutoRenewal(billing.AutoRenewal) && now.After(endDate) {
+			newStartStr, newEndStr, newEnd, renewed := advanceRenewalDate(billing.RegisteredDate, billing.EndDate, billing.Cycle, now)
+			if renewed {
+				billing.EndDate = newEndStr
+				if billing.RegisteredDate != "" {
+					billing.RegisteredDate = newStartStr
+				}
+				newBillingData, _ := json.Marshal(billing)
+				d.BillingData = newBillingData
+				endDate = newEnd
+				log.Printf("NEZHA>> Cron::域名 %s 开启了自动续费，已自动顺延至 %s", d.Domain, billing.EndDate)
+				if err := DB.Save(&d).Error; err != nil {
+					log.Printf("NEZHA>> Cron::Error saving auto-renewed domain %s: %v", d.Domain, err)
+				}
+			}
+		} else if now.After(endDate) {
+			d.Status = "expired"
+			log.Printf("NEZHA>> Cron::域名 %s 已过期", d.Domain)
+			if err := DB.Save(&d).Error; err != nil {
+				log.Printf("NEZHA>> Cron::Error marking domain %s as expired: %v", d.Domain, err)
+			}
+		}
+
 		daysLeft := int(endDate.Sub(now).Hours() / 24)
 
-		// 只有在到期前一定天数通知，且避开重复通知 (简单逻辑：每天通知一次)
-		if Conf.ExpiryNotificationGroupID != 0 && isDomainNotificationDay(daysLeft) {
+		if isDomainNotificationDay(daysLeft) {
 			msg := ""
 			if daysLeft+1 > 0 {
 				msg = fmt.Sprintf("域名 [%s] 即将到期，剩余 %d 天。到期时间: %s", d.Domain, daysLeft+1, endDate.Format("2006-01-02"))
 			} else {
 				msg = fmt.Sprintf("域名 [%s] 已到期！到期时间: %s", d.Domain, endDate.Format("2006-01-02"))
 			}
-			NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-domain-%d-%d", d.ID, daysLeft))
-		}
-
-		if now.After(endDate) {
-			if billing.AutoRenewal == "1" {
-				var newEndDate time.Time
-				renewalYears := 0
-				renewalMonths := 0
-				switch billing.Cycle {
-				case "年":
-					renewalYears = 1
-				case "月":
-					renewalMonths = 1
-				default:
-					log.Printf("NEZHA>> Cron::未知续费周期 '%s' for domain %s", billing.Cycle, d.Domain)
-					continue
-				}
-
-				newEndDate = endDate.AddDate(renewalYears, renewalMonths, 0)
-				billing.EndDate = newEndDate.Format(time.RFC3339)
-				newBillingData, _ := json.Marshal(billing)
-				d.BillingData = newBillingData
-				log.Printf("NEZHA>> Cron::域名 %s 已自动续费至 %s", d.Domain, billing.EndDate)
-				if err := DB.Save(&d).Error; err != nil {
-					log.Printf("NEZHA>> Cron::Error saving auto-renewed domain %s: %v", d.Domain, err)
-				}
-			} else {
-				d.Status = "expired"
-				log.Printf("NEZHA>> Cron::域名 %s 已过期", d.Domain)
-				if err := DB.Save(&d).Error; err != nil {
-					log.Printf("NEZHA>> Cron::Error marking domain %s as expired: %v", d.Domain, err)
-				}
+			if Conf.ExpiryNotificationGroupID != 0 {
+				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-domain-%d-%d", d.ID, daysLeft))
+			}
+			SendTGAdminNotification("🌐 <b>域名到期提醒</b>\n\n" + msg)
+			if model.SendGlobalEmailFunc != nil {
+				_ = model.SendGlobalEmailFunc(msg)
 			}
 		}
 	}
 	log.Println("NEZHA>> Cron::域名状态检查任务执行完毕")
 }
 
-// CronJobForServerStatus 检查服务器/VPS 到期通知
+// CronJobForServerStatus 检查服务器/VPS 到期通知与自动续费滚动
 func CronJobForServerStatus() {
 	log.Println("NEZHA>> Cron::开始执行服务器到期检查任务")
 	var servers []model.Server
@@ -476,51 +560,99 @@ func CronJobForServerStatus() {
 	now := time.Now()
 
 	for i := range servers {
-		s := servers[i]
-		var pn struct {
-			BillingDataMod struct {
-				EndDate string `json:"endDate"`
-			} `json:"billingDataMod"`
-		}
+		s := &servers[i]
+
+		var publicNoteObj map[string]any
+		var noteObj map[string]any
+		var billingMap map[string]any
+		isPublicNote := false
+		isPrivateNote := false
+
 		if s.PublicNote != "" {
-			_ = json.Unmarshal([]byte(s.PublicNote), &pn)
+			if err := json.Unmarshal([]byte(s.PublicNote), &publicNoteObj); err == nil && publicNoteObj != nil {
+				if bm, ok := publicNoteObj["billingDataMod"].(map[string]any); ok && bm != nil {
+					billingMap = bm
+					isPublicNote = true
+				}
+			}
 		}
-		if pn.BillingDataMod.EndDate == "" {
+
+		if billingMap == nil && s.Note != "" {
+			if err := json.Unmarshal([]byte(s.Note), &noteObj); err == nil && noteObj != nil {
+				if bm, ok := noteObj["billingDataMod"].(map[string]any); ok && bm != nil {
+					billingMap = bm
+					isPrivateNote = true
+				}
+			}
+		}
+
+		if billingMap == nil {
 			continue
 		}
 
-		// 忽略前端默认生成的空日期
-		if strings.HasPrefix(pn.BillingDataMod.EndDate, "0000-00-00") {
+		endDateStr, _ := billingMap["endDate"].(string)
+		if endDateStr == "" || strings.HasPrefix(endDateStr, "0000-00-00") {
 			continue
 		}
 
-		// 处理类似 2026-10-10 甚至其他不带时区的格式
-		endDateStr := pn.BillingDataMod.EndDate
-		var endDate time.Time
-		var err error
-		if len(endDateStr) == 10 { // YYYY-MM-DD
-			endDate, err = time.Parse("2006-01-02", endDateStr)
-		} else if len(endDateStr) == 19 && endDateStr[10] == ' ' { // YYYY-MM-DD HH:MM:SS
-			endDate, err = time.Parse("2006-01-02 15:04:05", endDateStr)
-		} else {
-			endDate, err = time.Parse(time.RFC3339, endDateStr)
-		}
+		startDateStr, _ := billingMap["startDate"].(string)
+		cycle, _ := billingMap["cycle"].(string)
+		autoRenewalVal := billingMap["autoRenewal"]
 
+		endDate, err := ParseFlexibleDate(endDateStr)
 		if err != nil {
 			log.Printf("NEZHA>> Cron::Error parsing end date for VPS %s: %v", s.Name, err)
 			continue
 		}
 
+		// 如果开启了自动续费且已到达或超过到期时间，自动将周期顺延至未来的有效周期
+		if isAutoRenewal(autoRenewalVal) && now.After(endDate) {
+			newStartStr, newEndStr, newEnd, renewed := advanceRenewalDate(startDateStr, endDateStr, cycle, now)
+			if renewed {
+				billingMap["endDate"] = newEndStr
+				if startDateStr != "" {
+					billingMap["startDate"] = newStartStr
+				}
+				endDate = newEnd
+
+				if isPublicNote {
+					publicNoteObj["billingDataMod"] = billingMap
+					if updatedJSON, err := json.Marshal(publicNoteObj); err == nil {
+						s.PublicNote = string(updatedJSON)
+					}
+				} else if isPrivateNote {
+					noteObj["billingDataMod"] = billingMap
+					if updatedJSON, err := json.Marshal(noteObj); err == nil {
+						s.Note = string(updatedJSON)
+					}
+				}
+
+				if err := DB.Save(s).Error; err != nil {
+					log.Printf("NEZHA>> Cron::Error saving auto-renewed VPS %s: %v", s.Name, err)
+				} else {
+					ServerShared.Update(s, s.UUID)
+					log.Printf("NEZHA>> Cron::VPS [%s] 开启了自动续费，到期时间已自动顺延至 %s (周期: %s)", s.Name, newEndStr, cycle)
+				}
+			}
+		}
+
 		daysLeft := int(endDate.Sub(now).Hours() / 24)
 
-		if Conf.ExpiryNotificationGroupID != 0 && isServerNotificationDay(daysLeft) {
+		if isServerNotificationDay(daysLeft) {
 			msg := ""
 			if daysLeft+1 > 0 {
 				msg = fmt.Sprintf("VPS [%s] 即将到期，剩余 %d 天。到期时间: %s", s.Name, daysLeft+1, endDate.Format("2006-01-02"))
 			} else {
 				msg = fmt.Sprintf("VPS [%s] 已到期！到期时间: %s", s.Name, endDate.Format("2006-01-02"))
 			}
-			NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-server-%d-%d", s.ID, daysLeft), &s)
+			if Conf.ExpiryNotificationGroupID != 0 {
+				NotificationShared.SendNotification(Conf.ExpiryNotificationGroupID, msg, fmt.Sprintf("expiry-server-%d-%d", s.ID, daysLeft), s)
+			}
+
+			SendTGAdminNotification("🖥 <b>VPS 到期提醒</b>\n\n" + msg)
+			if model.SendGlobalEmailFunc != nil {
+				_ = model.SendGlobalEmailFunc(msg)
+			}
 		}
 	}
 	log.Println("NEZHA>> Cron::服务器到期检查任务执行完毕")

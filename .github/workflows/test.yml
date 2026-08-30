@@ -25,7 +25,11 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     steps:
+
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
@@ -66,6 +70,8 @@ jobs:
           touch ./cmd/dashboard/user-dist/a
           touch ./cmd/dashboard/admin-dist/a
           swag init --pd -d cmd/dashboard -g main.go -o cmd/dashboard/docs
+
+
 
       - name: Race and shuffle tests
         run: go test -mod=readonly -race -shuffle=on -count=1 ./...

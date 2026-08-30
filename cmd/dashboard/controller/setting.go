@@ -127,7 +127,6 @@ func updateConfig(c *gin.Context) (any, error) {
 	mcpWasEnabled := singleton.Conf.MCPEnabled()
 	mcpNext := resolveSettingEnableMCP(sf.EnableMCP, mcpWasEnabled)
 
-
 	if err := applyEnableMCPTransition(
 		mcpWasEnabled, mcpNext,
 		singleton.Conf.SetMCPEnabled,
@@ -138,6 +137,7 @@ func updateConfig(c *gin.Context) (any, error) {
 	}
 
 	singleton.OnUpdateLang(singleton.Conf.Language)
+	singleton.InitTelegramBot()
 	return nil, nil
 }
 

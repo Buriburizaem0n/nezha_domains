@@ -23,33 +23,62 @@ var (
 	})
 )
 
-type IPInfo struct {
-	// 对应数据库里的 "country_code" 字段 (例如 "CN")
-	CountryCode string `maxminddb:"country_code"`
-
-	// 对应数据库里的 "continent_code" 字段 (例如 "AS")
+type IPRecord struct {
+	// IPInfo format (e.g. "US", "CN")
+	CountryCode   string `maxminddb:"country_code"`
 	ContinentCode string `maxminddb:"continent_code"`
+
+	// MaxMind / GeoLite2 format
+	Country struct {
+		IsoCode string `maxminddb:"iso_code"`
+	} `maxminddb:"country"`
+	RegisteredCountry struct {
+		IsoCode string `maxminddb:"iso_code"`
+	} `maxminddb:"registered_country"`
+	RepresentedCountry struct {
+		IsoCode string `maxminddb:"iso_code"`
+	} `maxminddb:"represented_country"`
+	Continent struct {
+		Code string `maxminddb:"code"`
+	} `maxminddb:"continent"`
 }
 
 func Lookup(ip net.IP) (string, error) {
+	if ip == nil {
+		return "", errors.New("nil IP")
+	}
+
 	db, err := dbOnce()
 	if err != nil {
 		return "", err
 	}
 
-	var record IPInfo
+	var record IPRecord
 	err = db.Lookup(ip, &record)
 	if err != nil {
 		return "", err
 	}
 
-	// 1. 优先返回 CountryCode (如 "cn")
+	// 1. 优先返回当前分配的国家代码 (Country / CountryCode)
+	if record.Country.IsoCode != "" {
+		return strings.ToLower(record.Country.IsoCode), nil
+	}
 	if record.CountryCode != "" {
-		// 前端依然需要小写才能匹配 flags/cn.svg
 		return strings.ToLower(record.CountryCode), nil
 	}
 
-	// 2. 其次返回 ContinentCode
+	// 2. 其次回退到注册地或代表国家代码 (Registered / Represented)
+	if record.RegisteredCountry.IsoCode != "" {
+		return strings.ToLower(record.RegisteredCountry.IsoCode), nil
+	}
+	if record.RepresentedCountry.IsoCode != "" {
+		return strings.ToLower(record.RepresentedCountry.IsoCode), nil
+	}
+
+	// 3. 兜底返回大洲代码 (Continent)
+	if record.Continent.Code != "" {
+		return strings.ToLower(record.Continent.Code), nil
+	}
 	if record.ContinentCode != "" {
 		return strings.ToLower(record.ContinentCode), nil
 	}

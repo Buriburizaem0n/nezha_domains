@@ -29,9 +29,10 @@ func init() {
 			if err == nil && adminChatID != 0 {
 				safeDesc := html.EscapeString(message)
 				msg := fmt.Sprintf("⚠️ <b>Nezha 报警通知</b>\n\n%s", safeDesc)
-				sendTGMessage(adminChatID, msg)
+				SendTGMessage(adminChatID, msg)
 				log.Printf("NEZHA>> Sent notification to Telegram Admin Bot")
 				return nil
+
 			}
 		}
 		return nil

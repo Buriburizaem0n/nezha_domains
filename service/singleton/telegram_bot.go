@@ -1,6 +1,7 @@
 package singleton
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nezhahq/nezha/model"
@@ -16,8 +18,8 @@ import (
 )
 
 type tgUpdate struct {
-	UpdateID      int `json:"update_id"`
-	Message       *tgMessage `json:"message"`
+	UpdateID      int              `json:"update_id"`
+	Message       *tgMessage       `json:"message"`
 	CallbackQuery *tgCallbackQuery `json:"callback_query"`
 }
 
@@ -33,26 +35,42 @@ type tgMessage struct {
 }
 
 type tgCallbackQuery struct {
-	ID      string     `json:"id"`
-	From    struct {
+	ID   string `json:"id"`
+	From struct {
 		ID int64 `json:"id"`
 	} `json:"from"`
 	Message *tgMessage `json:"message"`
 	Data    string     `json:"data"`
 }
 
+var (
+	tgBotCancel context.CancelFunc
+	tgBotMu     sync.Mutex
+)
+
 func InitTelegramBot() {
+	tgBotMu.Lock()
+	defer tgBotMu.Unlock()
+
+	if tgBotCancel != nil {
+		tgBotCancel()
+		tgBotCancel = nil
+	}
+
 	log.Printf("NEZHA>> InitTelegramBot called. Token length: %d", len(Conf.TelegramBotToken))
 	if Conf.TelegramBotToken == "" {
 		log.Println("NEZHA>> TG Bot Token 未配置，跳过启动互动机器人")
 		return
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	tgBotCancel = cancel
+
 	log.Println("NEZHA>> 正在启动 Telegram 互动机器人...")
-	
+
 	// 在启动前删除可能存在的 Webhook，防止 getUpdates 冲突
 	deleteWebhookURL := fmt.Sprintf("https://api.telegram.org/bot%s/deleteWebhook?drop_pending_updates=true", Conf.TelegramBotToken)
-	if req, err := http.NewRequest(http.MethodPost, deleteWebhookURL, nil); err == nil {
+	if req, err := http.NewRequestWithContext(ctx, http.MethodPost, deleteWebhookURL, nil); err == nil {
 		if resp, err := utils.HttpClient.Do(req); err == nil {
 			log.Printf("NEZHA>> 尝试删除 Webhook 完毕，状态码: %d", resp.StatusCode)
 			resp.Body.Close()
@@ -64,8 +82,18 @@ func InitTelegramBot() {
 	go func() {
 		offset := 0
 		for {
+			select {
+			case <-ctx.Done():
+				log.Println("NEZHA>> TG Bot 停止轮询")
+				return
+			default:
+			}
+
 			updates, err := getTGUpdates(Conf.TelegramBotToken, offset)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				log.Printf("NEZHA>> 获取 TG Bot 更新失败: %v", err)
 				// 避免过于频繁报错
 				time.Sleep(10 * time.Second)
@@ -83,6 +111,19 @@ func InitTelegramBot() {
 			time.Sleep(2 * time.Second)
 		}
 	}()
+}
+
+// SendTGAdminNotification 发送通知给配置的 Telegram Admin
+func SendTGAdminNotification(text string) {
+	if Conf.TelegramBotToken == "" || Conf.TelegramAdminChatID == "" {
+		return
+	}
+	adminChatID, err := strconv.ParseInt(Conf.TelegramAdminChatID, 10, 64)
+	if err != nil || adminChatID == 0 {
+		log.Printf("NEZHA>> [TG Bot] TelegramAdminChatID 格式无效: %s", Conf.TelegramAdminChatID)
+		return
+	}
+	SendTGMessage(adminChatID, text)
 }
 
 func getTGUpdates(token string, offset int) ([]tgUpdate, error) {
@@ -134,7 +175,7 @@ func handleTGUpdate(update tgUpdate) {
 	// 权限检查
 	if adminChatID != 0 && chatID != adminChatID {
 		log.Printf("NEZHA>> [TG Bot] 拒绝了来自 ChatID %d 的请求", chatID)
-		sendTGMessage(chatID, "🚫 您没有权限操作此机器人。")
+		SendTGMessage(chatID, "🚫 您没有权限操作此机器人。")
 		return
 	}
 
@@ -156,7 +197,7 @@ func handleTGUpdate(update tgUpdate) {
 		sendTGDomains(chatID)
 	default:
 		if strings.HasPrefix(text, "/") {
-			sendTGMessage(chatID, "❓ 未知命令，请输入 /start 查看菜单。")
+			SendTGMessage(chatID, "❓ 未知命令，请输入 /start 查看菜单。")
 		}
 	}
 }
@@ -223,7 +264,7 @@ func sendTGServerList(chatID int64, page int, messageID int) {
 	}
 
 	kbJSON, _ := json.Marshal(map[string]interface{}{"inline_keyboard": keyboard})
-	
+
 	method := "sendMessage"
 	params := url.Values{
 		"chat_id":      {strconv.FormatInt(chatID, 10)},
@@ -241,7 +282,7 @@ func sendTGServerList(chatID int64, page int, messageID int) {
 func sendTGServerDetail(chatID int64, serverID uint64, messageID int) {
 	s, ok := ServerShared.Get(serverID)
 	if !ok {
-		sendTGMessage(chatID, "❌ 找不到该服务器。")
+		SendTGMessage(chatID, "❌ 找不到该服务器。")
 		return
 	}
 
@@ -255,7 +296,7 @@ func sendTGServerDetail(chatID int64, serverID uint64, messageID int) {
 	sb.WriteString(fmt.Sprintf("━━━━━━━━━━━━━━━\n"))
 	sb.WriteString(fmt.Sprintf("状态: %s\n", statusIcon))
 	sb.WriteString(fmt.Sprintf("系统: %s-%s (%s)\n", s.Host.Platform, s.Host.PlatformVersion, s.Host.Arch))
-	
+
 	// 计费信息
 	var noteData struct {
 		BillingDataMod struct {
@@ -265,8 +306,8 @@ func sendTGServerDetail(chatID int64, serverID uint64, messageID int) {
 		} `json:"billingDataMod"`
 	}
 	if (s.Note != "" && json.Unmarshal([]byte(s.Note), &noteData) == nil && noteData.BillingDataMod.EndDate != "") ||
-	   (s.PublicNote != "" && json.Unmarshal([]byte(s.PublicNote), &noteData) == nil && noteData.BillingDataMod.EndDate != "") {
-		if endDate, err := time.Parse(time.RFC3339, noteData.BillingDataMod.EndDate); err == nil {
+		(s.PublicNote != "" && json.Unmarshal([]byte(s.PublicNote), &noteData) == nil && noteData.BillingDataMod.EndDate != "") {
+		if endDate, err := ParseFlexibleDate(noteData.BillingDataMod.EndDate); err == nil {
 			daysLeft := int(endDate.Sub(time.Now()).Hours() / 24)
 			sb.WriteString(fmt.Sprintf("到期: %s (%d天后)\n", endDate.Format("2006-01-02"), daysLeft))
 			if noteData.BillingDataMod.Amount != "" {
@@ -318,12 +359,10 @@ func sendTGMainMenu(chatID int64) {
 	})
 }
 
-
-
 func sendTGDomains(chatID int64) {
 	domains, err := GetDomains("admin")
 	if err != nil {
-		sendTGMessage(chatID, "❌ 获取域名列表失败。")
+		SendTGMessage(chatID, "❌ 获取域名列表失败。")
 		return
 	}
 
@@ -343,7 +382,7 @@ func sendTGDomains(chatID int64) {
 		if d.BillingData != nil {
 			var billing model.BillingDataMod
 			if json.Unmarshal(d.BillingData, &billing) == nil && billing.EndDate != "" {
-				if endDate, err := time.Parse(time.RFC3339, billing.EndDate); err == nil {
+				if endDate, err := ParseFlexibleDate(billing.EndDate); err == nil {
 					daysLeft := int(endDate.Sub(now).Hours() / 24)
 					expiresInfo = fmt.Sprintf("%d 天", daysLeft)
 				}
@@ -358,10 +397,11 @@ func sendTGDomains(chatID int64) {
 		sb.WriteString("暂无监控中的域名。")
 	}
 
-	sendTGMessage(chatID, sb.String())
+	SendTGMessage(chatID, sb.String())
 }
 
-func sendTGMessage(chatID int64, text string) {
+// SendTGMessage 发送任意文本消息给指定 ChatID
+func SendTGMessage(chatID int64, text string) {
 	log.Printf("NEZHA>> [TG Bot] 准备发送消息到 ChatID %d，长度: %d", chatID, len(text))
 	sendTGRequest("sendMessage", url.Values{
 		"chat_id":    {strconv.FormatInt(chatID, 10)},

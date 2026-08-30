@@ -1,9 +1,12 @@
 package model
 
 import (
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/go-viper/mapstructure/v2"
 	kmaps "github.com/knadh/koanf/maps"
@@ -15,9 +18,19 @@ import (
 	"github.com/nezhahq/nezha/pkg/utils"
 )
 
+// JWTSecretEnvKey is the canonical environment variable that injects the JWT
+// signing key. When set, the dashboard never writes the key to disk and the
+// version-driven rotation in RotateJWTSecretKeyIfNeeded is skipped so that
+// rotation is fully controlled by the operator / KMS.
+const JWTSecretEnvKey = "NZ_JWTSECRETKEY" // #nosec G101 -- environment variable name, not a hardcoded secret value.
+
 const (
-	ConfigUsePeerIP = "NZ::Use-Peer-IP"
-	ConfigCoverAll  = iota
+	ConfigUsePeerIP                     = "NZ::Use-Peer-IP"
+	JWTSecretKeyRotationBaselineVersion = "v2.0.13"
+)
+
+const (
+	ConfigCoverAll = iota + 1
 	ConfigCoverIgnoreAll
 )
 
@@ -35,7 +48,17 @@ type ConfigForGuests struct {
 
 type ConfigDashboard struct {
 	InstallHost string `koanf:"install_host" json:"install_host,omitempty"`
-	AgentTLS    bool   `koanf:"tls" json:"tls,omitempty"` // 用于前端判断生成的安装命令是否启用 TLS
+	// AgentTLS controls the transport emitted by Agent installation commands.
+	// false intentionally supports trusted private networks and does not provide
+	// Dashboard peer authentication; Internet-facing control planes must use
+	// verified TLS. Changing this compatibility default belongs in the installer
+	// migration path, not in the gRPC task authorization model.
+	AgentTLS bool `koanf:"tls" json:"tls,omitempty"`
+
+	// DashboardHost 是 dashboard 对外访问的主机名，专用于 OAuth2 回调地址。
+	// 它与 InstallHost（agent 连接用主机名）解耦：两者可以是不同域名。
+	// 为空时，OAuth2 回调放行请求 Host（信任请求头），不做强制重写。
+	DashboardHost string `koanf:"dashboard_host" json:"dashboard_host,omitempty"`
 
 	WebRealIPHeader   string `koanf:"web_real_ip_header" json:"web_real_ip_header,omitempty"`     // 前端真实IP
 	AgentRealIPHeader string `koanf:"agent_real_ip_header" json:"agent_real_ip_header,omitempty"` // Agent真实IP
@@ -43,6 +66,13 @@ type ConfigDashboard struct {
 	AdminTemplate     string `koanf:"admin_template" json:"admin_template,omitempty"`
 
 	EnablePlainIPInNotification bool   `koanf:"enable_plain_ip_in_notification" json:"enable_plain_ip_in_notification,omitempty"` // 通知信息IP不打码
+
+	EnableMCP bool `koanf:"enable_mcp" json:"enable_mcp,omitempty"` // 是否启用 MCP 入口（默认关闭；启用前请审视 PAT scope/whitelist）
+
+	// GHSA-x6fg-52vr-hj4w：反代部署下 dashboard 的对外域名进程自身看不到，
+	// InstallHost/ListenHost 无法覆盖。运维在此用逗号分隔声明这些对外 host，
+	// 成员便无法注册与之冲突的 NAT 域名抢占路由。
+	ReservedHosts string `koanf:"reserved_hosts" json:"reserved_hosts,omitempty"`
 
 	// IP变更提醒
 	EnableIPChangeNotification  bool   `koanf:"enable_ip_change_notification" json:"enable_ip_change_notification,omitempty"`
@@ -75,9 +105,18 @@ type Config struct {
 	AgentSecretKey string `koanf:"agent_secret_key" json:"agent_secret_key,omitempty"`
 	JWTTimeout     int    `koanf:"jwt_timeout" json:"jwt_timeout,omitempty"` // JWT token过期时间（小时）
 
-	JWTSecretKey string `koanf:"jwt_secret_key" json:"jwt_secret_key,omitempty"`
-	ListenPort   uint16 `koanf:"listen_port" json:"listen_port,omitempty"`
-	ListenHost   string `koanf:"listen_host" json:"listen_host,omitempty"`
+	JWTSecretKey                   string `koanf:"jwt_secret_key" json:"-" yaml:"-"`
+	JWTSecretKeyLastRotatedVersion string `koanf:"jwt_secret_key_last_rotated_version" json:"jwt_secret_key_last_rotated_version,omitempty"`
+	ListenPort                     uint16 `koanf:"listen_port" json:"listen_port,omitempty"`
+	ListenHost                     string `koanf:"listen_host" json:"listen_host,omitempty"`
+
+	jwtSecretFromEnv  bool `koanf:"-" json:"-" yaml:"-"`
+	jwtSecretFromYAML bool `koanf:"-" json:"-" yaml:"-"`
+
+	// mcpEnabled：EnableMCP 的并发安全镜像，kill switch 跨 goroutine 读写走
+	// MCPEnabled()/SetMCPEnabled()。放外层 Config 而非 ConfigDashboard，避免
+	// SettingResponse 按值拷贝 ConfigDashboard 触发 copylocks。
+	mcpEnabled atomic.Bool `koanf:"-" json:"-" yaml:"-"`
 
 	// oauth2 配置
 	Oauth2 map[string]*Oauth2Config `koanf:"oauth2" json:"oauth2,omitempty"`
@@ -175,12 +214,23 @@ func (c *Config) Read(path string, frontendTemplates []FrontendTemplate) error {
 	if c.Cover == 0 {
 		c.Cover = 1
 	}
+	if envSecret := os.Getenv(JWTSecretEnvKey); envSecret != "" {
+		c.JWTSecretKey = envSecret
+		c.jwtSecretFromEnv = true
+	} else if c.JWTSecretKey != "" {
+		c.jwtSecretFromYAML = true
+		log.Printf("NEZHA>> jwt_secret_key loaded from config.yaml; recommend injecting via env %s to keep it off disk", JWTSecretEnvKey)
+	}
+
 	if c.JWTSecretKey == "" {
-		c.JWTSecretKey, err = utils.GenerateRandomString(1024)
+		generated, err := utils.GenerateRandomString(1024)
 		if err != nil {
 			return err
 		}
-		if err = c.Save(); err != nil {
+		c.JWTSecretKey = generated
+		c.jwtSecretFromYAML = true
+		log.Printf("NEZHA>> generated new jwt_secret_key; wrote to config.yaml. For production, inject via env %s and remove the field from config.yaml.", JWTSecretEnvKey)
+		if err := c.patchYAMLField("jwt_secret_key", generated); err != nil {
 			return err
 		}
 	}
@@ -200,7 +250,21 @@ func (c *Config) Read(path string, frontendTemplates []FrontendTemplate) error {
 		}
 	}
 
+	c.mcpEnabled.Store(c.EnableMCP)
+
 	return nil
+}
+
+// MCPEnabled 并发安全地读取 MCP kill switch 状态。
+func (c *Config) MCPEnabled() bool {
+	return c.mcpEnabled.Load()
+}
+
+// SetMCPEnabled 并发安全地更新 MCP kill switch 状态。只写 atomic 镜像，不直接
+// 写 EnableMCP 明文字段——后者会与 listConfig 的 *singleton.Conf 整体拷贝读发生
+// 数据竞争。持久化由 save() 在 marshal 前从 atomic 同步明文字段完成。
+func (c *Config) SetMCPEnabled(v bool) {
+	c.mcpEnabled.Store(v)
 }
 
 // Save 保存配置文件
@@ -208,7 +272,69 @@ func (c *Config) Save() error {
 	return c.save()
 }
 
+func (c *Config) RotateJWTSecretKeyIfNeeded(currentVersion string) (bool, error) {
+	if c.jwtSecretFromEnv {
+		return false, nil
+	}
+
+	currentVersion = strings.TrimSpace(currentVersion)
+	if compareVersion(currentVersion, JWTSecretKeyRotationBaselineVersion) < 0 {
+		return false, nil
+	}
+
+	initialMarker := c.JWTSecretKeyLastRotatedVersion
+	shouldRotate := c.JWTSecretKeyLastRotatedVersion == "" || compareVersion(c.JWTSecretKeyLastRotatedVersion, JWTSecretKeyRotationBaselineVersion) < 0
+	if shouldRotate {
+		secret, err := utils.GenerateRandomString(1024)
+		if err != nil {
+			return false, err
+		}
+		c.JWTSecretKey = secret
+	}
+
+	c.JWTSecretKeyLastRotatedVersion = currentVersion
+
+	if !shouldRotate && c.JWTSecretKeyLastRotatedVersion == initialMarker {
+		return false, nil
+	}
+	if shouldRotate {
+		if err := c.patchYAMLField("jwt_secret_key", c.JWTSecretKey); err != nil {
+			return false, err
+		}
+	}
+	if err := c.patchYAMLField("jwt_secret_key_last_rotated_version", c.JWTSecretKeyLastRotatedVersion); err != nil {
+		return false, err
+	}
+	return shouldRotate, nil
+}
+
+func (c *Config) patchYAMLField(key string, value any) error {
+	dir := filepath.Dir(c.filePath)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return err
+	}
+
+	raw := map[string]any{}
+	if data, err := os.ReadFile(c.filePath); err == nil {
+		if len(data) > 0 {
+			if err := yaml.Unmarshal(data, &raw); err != nil {
+				return err
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	raw[key] = value
+
+	out, err := yaml.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.filePath, out, 0600)
+}
+
 func (c *Config) save() error {
+	c.EnableMCP = c.mcpEnabled.Load()
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return err
@@ -224,6 +350,40 @@ func (c *Config) write(data []byte) error {
 	}
 
 	return os.WriteFile(c.filePath, data, 0600)
+}
+
+func compareVersion(left, right string) int {
+	leftParts, leftOK := parseVersion(left)
+	rightParts, rightOK := parseVersion(right)
+	if !leftOK || !rightOK {
+		return -1
+	}
+	for i := range leftParts {
+		if leftParts[i] < rightParts[i] {
+			return -1
+		}
+		if leftParts[i] > rightParts[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+func parseVersion(version string) ([3]int, bool) {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return [3]int{}, false
+	}
+	var parsed [3]int
+	for i, part := range parts {
+		value, err := strconv.Atoi(part)
+		if err != nil {
+			return [3]int{}, false
+		}
+		parsed[i] = value
+	}
+	return parsed, true
 }
 
 func koanfConf(c any) koanf.UnmarshalConf {

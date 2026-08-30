@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/goccy/go-json"
-	"github.com/gorilla/websocket"
 	"github.com/hashicorp/go-uuid"
 
 	"github.com/nezhahq/nezha/model"
@@ -24,8 +23,9 @@ import (
 // @Param id query uint true "Server ID"
 // @Produce json
 // @Success 200 {object} model.CreateFMResponse
-// @Router /file [get]
+// @Router /file [post]
 func createFM(c *gin.Context) (*model.CreateFMResponse, error) {
+	prepareAgentcompatCapabilityHeader(c)
 	idStr := c.Query("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -33,7 +33,10 @@ func createFM(c *gin.Context) (*model.CreateFMResponse, error) {
 	}
 
 	server, _ := singleton.ServerShared.Get(id)
-	if server == nil || server.TaskStream == nil {
+	if server == nil {
+		return nil, singleton.Localizer.ErrorT("server not found or not connected")
+	}
+	if server.GetTaskStream() == nil {
 		return nil, singleton.Localizer.ErrorT("server not found or not connected")
 	}
 
@@ -46,15 +49,24 @@ func createFM(c *gin.Context) (*model.CreateFMResponse, error) {
 		return nil, err
 	}
 
-	rpc.NezhaHandlerSingleton.CreateStream(streamId)
+	cleanup, err := createIOStreamWithAgentcompatCapability(c, streamId, getUid(c), server.ID, rpc.AgentCompatCapabilityFileManager)
+	if err != nil {
+		return nil, err
+	}
 
-	fmData, _ := json.Marshal(&model.TaskFM{
+	fmData, err := json.Marshal(&model.TaskFM{
 		StreamID: streamId,
 	})
-	if err := server.TaskStream.Send(&proto.Task{
+	if err != nil {
+		// A stream is owned by the caller only after this function succeeds.
+		cleanup()
+		return nil, err
+	}
+	if err := server.SendTask(&proto.Task{
 		Type: model.TaskTypeFM,
 		Data: string(fmData),
 	}); err != nil {
+		cleanup()
 		return nil, err
 	}
 
@@ -72,6 +84,12 @@ func createFM(c *gin.Context) (*model.CreateFMResponse, error) {
 // @Router /ws/file/{id} [get]
 func fmStream(c *gin.Context) (any, error) {
 	streamId := c.Param("id")
+	// GHSA-style fix: io_stream sessions must be reachable only by their creator
+	// (or an admin). Without this, any authenticated user who learns a stream
+	// UUID can hijack a live file-manager session on the target server.
+	if !streamAttachAllowedForRequest(c, streamId) {
+		return nil, singleton.Localizer.ErrorT("permission denied")
+	}
 	if _, err := rpc.NezhaHandlerSingleton.GetStream(streamId); err != nil {
 		return nil, err
 	}
@@ -81,18 +99,14 @@ func fmStream(c *gin.Context) (any, error) {
 	if err != nil {
 		return nil, newWsError("%v", err)
 	}
-	defer wsConn.Close()
 	conn := websocketx.NewConn(wsConn)
+	pingTransport := newWebsocketPingTransport(conn, wsConn.Close)
+	stopPing := startWebsocketPingTicker(c.Request.Context(), time.Second*10, pingTransport)
 
-	go func() {
-		// PING 保活
-		for {
-			if err = conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-				return
-			}
-			time.Sleep(time.Second * 10)
-		}
-	}()
+	deregisterPAT := registerPATConnection(c, func() { _ = pingTransport.Close() })
+	defer deregisterPAT()
+	// Join the ping worker before PAT and WebSocket cleanup can close its writer.
+	defer stopPing()
 
 	if err = rpc.NezhaHandlerSingleton.UserConnected(streamId, conn); err != nil {
 		return nil, newWsError("%v", err)

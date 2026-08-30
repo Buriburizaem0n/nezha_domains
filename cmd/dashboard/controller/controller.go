@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -45,6 +44,8 @@ func ServeWeb(frontendDist fs.FS) http.Handler {
 
 	routers(r, frontendDist)
 
+	kickoffTransferGC()
+
 	return r
 }
 
@@ -56,6 +57,20 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	if err := authMiddleware.MiddlewareInit(); err != nil {
 		log.Fatal("authMiddleware.MiddlewareInit Error:" + err.Error())
 	}
+	// /mcp — Model Context Protocol endpoint, authenticated by PAT only (闸 1 + 闸 2)。
+	// 不放在 /api/v1 下：MCP client 配置 URL 更短，且 MCP transport 协议演进与 REST API
+	// 解耦。鉴权一律走 apiTokenAuthMiddleware；不接受 JWT 以避免浏览器误触。
+	// mcpOriginGuard 防止 DNS rebinding / 浏览器跨站调用。
+	r.POST("/mcp", mcpOriginGuard(), apiTokenAuthMiddleware(), mcpEndpoint)
+	// Streamable HTTP 规范要求：不实现 standalone SSE / session 时，GET / DELETE
+	// 必须显式返回 405，让客户端走 POST-only 路径并跳过 session 终止流程。
+	// 不显式注册时，Gin 会走 NoRoute → fallbackToFrontend，对 MCP 客户端是 HTML/404。
+	r.GET("/mcp", mcpOriginGuard(), mcpMethodNotAllowed)
+	r.DELETE("/mcp", mcpOriginGuard(), mcpMethodNotAllowed)
+	r.GET("/mcp/download/:token", mcpOriginGuard(), transferDownloadHandler)
+	r.POST("/mcp/upload/:token", mcpOriginGuard(), transferUploadHandler)
+	registerAgentcompatRoutes(r)
+
 	api := r.Group("api/v1")
 	api.POST("/login", authMiddleware.LoginHandler)
 	api.GET("/oauth2/:provider", commonHandler(oauth2redirect))
@@ -68,92 +83,113 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	fallbackAuth.GET("/setting", commonHandler(listConfig))
 	fallbackAuth.GET("/oauth2/callback", commonHandler(oauth2callback(authMiddleware)))
 
-	authMw := authMiddleware.MiddlewareFunc()
-	optionalAuthMw := utils.IfOr(singleton.Conf.ForceAuth, authMw, fallbackAuthMw)
+	jwtMw := authMiddleware.MiddlewareFunc()
+	patMw := apiTokenAuthMiddleware()
+	authMw := jwtOrPATAuthMiddleware(patMw, jwtMw)
+	// optional 路由：ForceAuth=true 走严格 PAT-or-JWT；ForceAuth=false 走
+	// PAT-or-FallbackJWT，保证两种模式下 PAT 都会被解析，restScopeMiddleware
+	// 才能按 scope 真实收口（否则匿名 PAT 请求会被当 guest，scope 失效）。
+	optionalAuthMw := utils.IfOr(singleton.Conf.ForceAuth, authMw, patOrFallbackAuthMiddleware(patMw, fallbackAuthMw))
 
 	optionalAuth := api.Group("", optionalAuthMw)
-	optionalAuth.GET("/ws/server", commonHandler(serverStream))
-	optionalAuth.GET("/server-group", commonHandler(listServerGroup))
+	optionalAuth.GET("/ws/server", restScopeMiddleware(model.ScopeInventoryRead), commonHandler(serverStream))
+	optionalAuth.GET("/server-group", restScopeMiddleware(model.ScopeInventoryRead), commonHandler(listServerGroup))
 
-	optionalAuth.GET("/service", commonHandler(showService))
-	optionalAuth.GET("/service/server", commonHandler(listServerWithServices))
+	optionalAuth.GET("/service", restScopeMiddleware(model.ScopeServiceRead), commonHandler(showService))
+	optionalAuth.GET("/service/server", restScopeMiddleware(model.ScopeServiceRead), commonHandler(listServerWithServices))
 	optionalAuth.GET("/domains", commonHandler(GetDomainList))
-	optionalAuth.GET("/service/:id/history", commonHandler(getServiceHistory))
-	optionalAuth.GET("/server/:id/service", commonHandler(listServerServices))
-	optionalAuth.GET("/server/:id/metrics", commonHandler(getServerMetrics))
+	optionalAuth.GET("/service/:id/history", restScopeMiddleware(model.ScopeServiceRead), commonHandler(getServiceHistory))
+	optionalAuth.GET("/server/:id/service", restScopeMiddleware(model.ScopeServiceRead), commonHandler(listServerServices))
+	optionalAuth.GET("/server/:id/metrics", restScopeMiddleware(model.ScopeServerRead), commonHandler(getServerMetrics))
 
-	auth := api.Group("", authMw)
+	// CSRF middleware applies group-wide. Safe methods short-circuit and
+	// PAT bearer requests bypass — so the only callers gated are
+	// cookie-JWT POST/PATCH/PUT/DELETE, which is exactly the H6 surface.
+	auth := api.Group("", authMw, csrfMiddleware())
 
-	auth.GET("/refresh-token", authMiddleware.RefreshHandler)
+	// 「自我管理」类端点 — 显式禁止 PAT 访问（避免 PAT 自我提权链）。
+	patForbidden := restPATForbiddenMiddleware()
+	auth.POST("/refresh-token", patForbidden, authMiddleware.RefreshHandler)
+	auth.GET("/profile", patForbidden, commonHandler(getProfile))
+	auth.POST("/profile", patForbidden, commonHandler(updateProfile))
+	auth.POST("/oauth2/:provider/unbind", patForbidden, commonHandler(unbindOauth2))
+	auth.GET("/api-tokens", patForbidden, commonHandler(listAPITokens))
+	auth.POST("/api-tokens", patForbidden, commonHandler(createAPIToken))
+	auth.DELETE("/api-tokens/:id", patForbidden, commonHandler(deleteAPIToken))
 
-	auth.GET("/file", commonHandler(createFM))
-	auth.GET("/ws/file/:id", commonHandler(fmStream))
+	// 资源族划分：
+	//   - nezha:inventory:* —— 对“服务器台账”的枚举与删除（列出 server / server-group、
+	//     删除 server / server-group）。这是管理后台清单管理动作。
+	//   - nezha:server:*    —— 对已知 server 的运行态操作（文件读写、编辑配置、
+	//     force-update、batch-move）。（Web Terminal 按安全要求已移除）
+	auth.POST("/file", restScopeAllOf(model.ScopeServerRead, model.ScopeServerWrite, model.ScopeServerDelete), commonHandler(createFM))
+	auth.GET("/ws/file/:id", restScopeAllOf(model.ScopeServerRead, model.ScopeServerWrite, model.ScopeServerDelete), commonHandler(fmStream))
+	auth.GET("/server", restScopeMiddleware(model.ScopeInventoryRead), listHandler(listServer))
+	auth.PATCH("/server/:id", restScopeMiddleware(model.ScopeServerWrite), commonHandler(updateServer))
+	auth.GET("/server/config/:id", restScopeMiddleware(serverConfigSensitiveScope()), commonHandler(getServerConfig))
+	auth.POST("/server/config", restScopeMiddleware(model.ScopeServerWrite), commonHandler(setServerConfig))
+	auth.POST("/batch-delete/server", restScopeMiddleware(model.ScopeInventoryDelete), commonHandler(batchDeleteServer))
+	auth.POST("/batch-move/server", restScopeMiddleware(model.ScopeServerWrite), commonHandler(batchMoveServer))
+	auth.POST("/force-update/server", restScopeMiddleware(model.ScopeServerWrite), commonHandler(forceUpdateServer))
+	auth.POST("/server-group", restScopeMiddleware(model.ScopeServerWrite), commonHandler(createServerGroup))
+	auth.PATCH("/server-group/:id", restScopeMiddleware(model.ScopeServerWrite), commonHandler(updateServerGroup))
+	auth.POST("/batch-delete/server-group", restScopeMiddleware(model.ScopeInventoryDelete), commonHandler(batchDeleteServerGroup))
 
-	auth.GET("/profile", commonHandler(getProfile))
-	auth.POST("/profile", commonHandler(updateProfile))
-	auth.POST("/oauth2/:provider/unbind", commonHandler(unbindOauth2))
+	// transfer — 严格使用 nezha:transfer 资源族 scope（read/write/delete）。
+	auth.GET("/transfer", restScopeMiddleware(model.ScopeTransferRead), listHandler(listServerTransfer))
+	auth.POST("/transfer/:id/cancel", restScopeMiddleware(model.ScopeTransferWrite), commonHandler(cancelServerTransfer))
+	auth.POST("/transfer/:id/retry", restScopeMiddleware(model.ScopeTransferWrite), commonHandler(retryServerTransfer))
+	auth.GET("/ws/transfer", restScopeMiddleware(model.ScopeTransferRead), commonHandler(transferStream))
 
-	auth.GET("/user", adminHandler(listUser))
-	auth.POST("/user", adminHandler(createUser))
-	auth.POST("/batch-delete/user", adminHandler(batchDeleteUser))
 
-	auth.GET("/service/list", listHandler(listService))
-	auth.POST("/service", commonHandler(createService))
-	auth.PATCH("/service/:id", commonHandler(updateService))
-	auth.POST("/batch-delete/service", commonHandler(batchDeleteService))
+	// service monitor
+	auth.GET("/service/list", restScopeMiddleware(model.ScopeServiceRead), listHandler(listService))
+	auth.POST("/service", restScopeMiddleware(model.ScopeServiceWrite), commonHandler(createService))
+	auth.PATCH("/service/:id", restScopeMiddleware(model.ScopeServiceWrite), commonHandler(updateService))
+	auth.POST("/batch-delete/service", restScopeMiddleware(model.ScopeServiceDelete), commonHandler(batchDeleteService))
 
-	auth.POST("/server-group", commonHandler(createServerGroup))
-	auth.PATCH("/server-group/:id", commonHandler(updateServerGroup))
-	auth.POST("/batch-delete/server-group", commonHandler(batchDeleteServerGroup))
+	auth.GET("/notification-group", restScopeMiddleware(model.ScopeNotificationGroupRead), commonHandler(listNotificationGroup))
+	auth.POST("/notification-group", restScopeMiddleware(model.ScopeNotificationGroupWrite), commonHandler(createNotificationGroup))
+	auth.PATCH("/notification-group/:id", restScopeMiddleware(model.ScopeNotificationGroupWrite), commonHandler(updateNotificationGroup))
+	auth.POST("/batch-delete/notification-group", restScopeMiddleware(model.ScopeNotificationGroupDelete), commonHandler(batchDeleteNotificationGroup))
 
-	auth.GET("/notification-group", commonHandler(listNotificationGroup))
-	auth.POST("/notification-group", commonHandler(createNotificationGroup))
-	auth.PATCH("/notification-group/:id", commonHandler(updateNotificationGroup))
-	auth.POST("/batch-delete/notification-group", commonHandler(batchDeleteNotificationGroup))
+	auth.GET("/notification", restScopeMiddleware(model.ScopeNotificationRead), listHandler(listNotification))
+	auth.POST("/notification", restScopeMiddleware(model.ScopeNotificationWrite), commonHandler(createNotification))
+	auth.PATCH("/notification/:id", restScopeMiddleware(model.ScopeNotificationWrite), commonHandler(updateNotification))
+	auth.POST("/batch-delete/notification", restScopeMiddleware(model.ScopeNotificationDelete), commonHandler(batchDeleteNotification))
 
-	auth.GET("/server", listHandler(listServer))
-	auth.PATCH("/server/:id", commonHandler(updateServer))
-	auth.GET("/server/config/:id", commonHandler(getServerConfig))
-	auth.POST("/server/config", commonHandler(setServerConfig))
-	auth.POST("/batch-delete/server", commonHandler(batchDeleteServer))
-	auth.POST("/batch-move/server", commonHandler(batchMoveServer))
-	auth.POST("/force-update/server", commonHandler(forceUpdateServer))
+	auth.GET("/alert-rule", restScopeMiddleware(model.ScopeAlertRuleRead), listHandler(listAlertRule))
+	auth.POST("/alert-rule", restScopeMiddleware(model.ScopeAlertRuleWrite), commonHandler(createAlertRule))
+	auth.PATCH("/alert-rule/:id", restScopeMiddleware(model.ScopeAlertRuleWrite), commonHandler(updateAlertRule))
+	auth.POST("/batch-delete/alert-rule", restScopeMiddleware(model.ScopeAlertRuleDelete), commonHandler(batchDeleteAlertRule))
 
-	auth.GET("/notification", listHandler(listNotification))
-	auth.POST("/notification", commonHandler(createNotification))
-	auth.PATCH("/notification/:id", commonHandler(updateNotification))
-	auth.POST("/batch-delete/notification", commonHandler(batchDeleteNotification))
+	auth.GET("/cron", restScopeMiddleware(model.ScopeCronRead), listHandler(listCron))
+	auth.POST("/cron", restScopeMiddleware(model.ScopeCronWrite), commonHandler(createCron))
+	auth.PATCH("/cron/:id", restScopeMiddleware(model.ScopeCronWrite), commonHandler(updateCron))
+	auth.POST("/cron/:id/manual", restScopeMiddleware(model.ScopeCronExec), commonHandler(manualTriggerCron))
+	auth.POST("/batch-delete/cron", restScopeMiddleware(model.ScopeCronDelete), commonHandler(batchDeleteCron))
 
-	auth.GET("/alert-rule", listHandler(listAlertRule))
-	auth.POST("/alert-rule", commonHandler(createAlertRule))
-	auth.PATCH("/alert-rule/:id", commonHandler(updateAlertRule))
-	auth.POST("/batch-delete/alert-rule", commonHandler(batchDeleteAlertRule))
+	auth.GET("/ddns", restScopeMiddleware(model.ScopeDDNSRead), listHandler(listDDNS))
+	auth.GET("/ddns/providers", restScopeMiddleware(model.ScopeDDNSRead), commonHandler(listProviders))
+	auth.POST("/ddns", restScopeMiddleware(model.ScopeDDNSWrite), commonHandler(createDDNS))
+	auth.PATCH("/ddns/:id", restScopeMiddleware(model.ScopeDDNSWrite), commonHandler(updateDDNS))
+	auth.POST("/batch-delete/ddns", restScopeMiddleware(model.ScopeDDNSDelete), commonHandler(batchDeleteDDNS))
 
-	auth.GET("/cron", listHandler(listCron))
-	auth.POST("/cron", commonHandler(createCron))
-	auth.PATCH("/cron/:id", commonHandler(updateCron))
-	auth.GET("/cron/:id/manual", commonHandler(manualTriggerCron))
-	auth.POST("/batch-delete/cron", commonHandler(batchDeleteCron))
+	auth.GET("/nat", restScopeMiddleware(model.ScopeNATRead), listHandler(listNAT))
+	auth.POST("/nat", restScopeMiddleware(model.ScopeNATWrite), commonHandler(createNAT))
+	auth.PATCH("/nat/:id", restScopeMiddleware(model.ScopeNATWrite), commonHandler(updateNAT))
+	auth.POST("/batch-delete/nat", restScopeMiddleware(model.ScopeNATDelete), commonHandler(batchDeleteNAT))
 
-	auth.GET("/ddns", listHandler(listDDNS))
-	auth.GET("/ddns/providers", commonHandler(listProviders))
-	auth.POST("/ddns", commonHandler(createDDNS))
-	auth.PATCH("/ddns/:id", commonHandler(updateDDNS))
-	auth.POST("/batch-delete/ddns", commonHandler(batchDeleteDDNS))
-
-	auth.GET("/nat", listHandler(listNAT))
-	auth.POST("/nat", commonHandler(createNAT))
-	auth.PATCH("/nat/:id", commonHandler(updateNAT))
-	auth.POST("/batch-delete/nat", commonHandler(batchDeleteNAT))
-
-	auth.GET("/waf", pCommonHandler(listBlockedAddress))
-	auth.POST("/batch-delete/waf", adminHandler(batchDeleteBlockedAddress))
-
-	auth.GET("/online-user", pCommonHandler(listOnlineUser))
-	auth.POST("/online-user/batch-block", adminHandler(batchBlockOnlineUser))
-
-	auth.PATCH("/setting", adminHandler(updateConfig))
-	auth.POST("/maintenance", adminHandler(runMaintenance))
+	// 管理员资源 — 仅 nezha:* / nezha:admin:* 持有者可调（adminHandler 进一步校验 user.Role）。
+	auth.GET("/user", restScopeMiddleware(model.ScopeAdminAll), adminHandler(listUser))
+	auth.POST("/user", restScopeMiddleware(model.ScopeAdminAll), adminHandler(createUser))
+	auth.POST("/batch-delete/user", restScopeMiddleware(model.ScopeAdminAll), adminHandler(batchDeleteUser))
+	auth.GET("/waf", restScopeMiddleware(model.ScopeAdminAll), pAdminHandler(listBlockedAddress))
+	auth.POST("/batch-delete/waf", restScopeMiddleware(model.ScopeAdminAll), adminHandler(batchDeleteBlockedAddress))
+	auth.GET("/online-user", restScopeMiddleware(model.ScopeAdminAll), pAdminHandler(listOnlineUser))
+	auth.POST("/online-user/batch-block", restScopeMiddleware(model.ScopeAdminAll), adminHandler(batchBlockOnlineUser))
+	auth.PATCH("/setting", restScopeMiddleware(model.ScopeAdminAll), adminHandler(updateConfig))
+	auth.POST("/maintenance", restScopeMiddleware(model.ScopeAdminAll), adminHandler(runMaintenance))
 
 	auth.POST("/domains", commonHandler(AddDomain))
 	auth.POST("/domains/:id/verify", commonHandler(VerifyDomain))
@@ -293,6 +329,29 @@ func pCommonHandler[S ~[]E, E any](handler pHandlerFunc[S, E]) func(*gin.Context
 	}
 }
 
+func pAdminHandler[S ~[]E, E any](handler pHandlerFunc[S, E]) func(*gin.Context) {
+	return func(c *gin.Context) {
+		auth, ok := c.Get(model.CtxKeyAuthorizedUser)
+		if !ok {
+			c.JSON(http.StatusOK, newErrorResponse(singleton.Localizer.ErrorT("unauthorized")))
+			return
+		}
+		user := *auth.(*model.User)
+		if !user.Role.IsAdmin() {
+			c.JSON(http.StatusOK, newErrorResponse(singleton.Localizer.ErrorT("permission denied")))
+			return
+		}
+
+		data, err := handler(c)
+		if err != nil {
+			c.JSON(http.StatusOK, newErrorResponse(err))
+			return
+		}
+
+		c.JSON(http.StatusOK, model.PaginatedResponse[S, E]{Success: true, Data: data})
+	}
+}
+
 func filter[S ~[]E, E model.CommonInterface](ctx *gin.Context, s S) S {
 	return slices.DeleteFunc(s, func(e E) bool {
 		return !e.HasPermission(ctx)
@@ -305,25 +364,50 @@ func getUid(c *gin.Context) uint64 {
 }
 
 func fallbackToFrontend(frontendDist fs.FS) func(*gin.Context) {
-	checkLocalFileOrFs := func(c *gin.Context, fs fs.FS, path string, customStatusCode int) bool {
-		if _, err := os.Stat(path); err == nil {
-			http.ServeFile(utils.NewGinCustomWriter(c, customStatusCode), c.Request, path)
-			return true
-		}
-		f, err := fs.Open(path)
-		if err != nil {
-			return false
-		}
-		defer f.Close()
-		fileStat, err := f.Stat()
+	serveFile := func(c *gin.Context, name string, file fs.File, customStatusCode int) bool {
+		defer file.Close()
+		fileStat, err := file.Stat()
 		if err != nil {
 			return false
 		}
 		if fileStat.IsDir() {
 			return false
 		}
-		http.ServeContent(utils.NewGinCustomWriter(c, customStatusCode), c.Request, path, fileStat.ModTime(), f.(io.ReadSeeker))
+		readSeeker, ok := file.(io.ReadSeeker)
+		if !ok {
+			return false
+		}
+		http.ServeContent(utils.NewGinCustomWriter(c, customStatusCode), c.Request, name, fileStat.ModTime(), readSeeker)
 		return true
+	}
+
+	checkLocalFileOrFs := func(c *gin.Context, frontendFS fs.FS, templateRoot, filePath string, customStatusCode int) bool {
+		if filePath != "" {
+			localRoot, err := os.OpenRoot(templateRoot)
+			if err == nil {
+				defer localRoot.Close()
+				// URL paths must stay inside the selected template root; never join them against the process cwd.
+				if file, err := localRoot.Open(filePath); err == nil && serveFile(c, filePath, file, customStatusCode) {
+					return true
+				}
+			}
+		}
+
+		if !fs.ValidPath(filePath) {
+			return false
+		}
+		templateFS, err := fs.Sub(frontendFS, templateRoot)
+		if err != nil {
+			return false
+		}
+		file, err := templateFS.Open(filePath)
+		if err != nil {
+			return false
+		}
+		if serveFile(c, filePath, file, customStatusCode) {
+			return true
+		}
+		return false
 	}
 
 	frontendPageUrlRegistry := []*regexp.Regexp{
@@ -346,6 +430,12 @@ func fallbackToFrontend(frontendDist fs.FS) func(*gin.Context) {
 		regexp.MustCompile(`^/dashboard/settings/user$`),
 		regexp.MustCompile(`^/dashboard/settings/online-user$`),
 		regexp.MustCompile(`^/dashboard/settings/waf$`),
+		regexp.MustCompile(`^/dashboard/settings/api-tokens$`),
+		// 注意：这里的白名单决定哪些 URL 走 index.html fallback；漏一条就会把
+		// 直接刷新该页面变成 404（HTTP 状态码层面，body 仍是 index.html，所以
+		// 浏览器内 SPA 看起来正常，但 monitoring / 链接预览会以为站点挂了）。
+		// 新增前端路由时必须在 admin-frontend/src/main.tsx 与这里同步加。
+		regexp.MustCompile(`^/dashboard/transfer$`),
 	}
 
 	getFallbackStatusCode := func(path string) int {
@@ -370,22 +460,22 @@ func fallbackToFrontend(frontendDist fs.FS) func(*gin.Context) {
 		}
 
 		fallbackStatusCode := getFallbackStatusCode(c.Request.URL.Path)
-		if strings.HasPrefix(c.Request.URL.Path, "/dashboard") {
-			stripPath := strings.TrimPrefix(c.Request.URL.Path, "/dashboard")
-			localFilePath := path.Join(singleton.Conf.AdminTemplate, stripPath)
-			if checkLocalFileOrFs(c, frontendDist, localFilePath, http.StatusOK) {
+		// Only /dashboard/ belongs to the admin frontend; /dashboard.. must not be trimmed into ../.
+		if strings.HasPrefix(c.Request.URL.Path, "/dashboard/") {
+			stripPath := strings.TrimPrefix(c.Request.URL.Path, "/dashboard/")
+			if checkLocalFileOrFs(c, frontendDist, singleton.Conf.AdminTemplate, stripPath, http.StatusOK) {
 				return
 			}
-			if !checkLocalFileOrFs(c, frontendDist, singleton.Conf.AdminTemplate+"/index.html", fallbackStatusCode) {
+			if !checkLocalFileOrFs(c, frontendDist, singleton.Conf.AdminTemplate, "index.html", fallbackStatusCode) {
 				c.JSON(http.StatusNotFound, newErrorResponse(errors.New("404 Not Found")))
 			}
 			return
 		}
-		localFilePath := path.Join(singleton.Conf.UserTemplate, c.Request.URL.Path)
-		if checkLocalFileOrFs(c, frontendDist, localFilePath, http.StatusOK) {
+		stripPath := strings.TrimPrefix(c.Request.URL.Path, "/")
+		if checkLocalFileOrFs(c, frontendDist, singleton.Conf.UserTemplate, stripPath, http.StatusOK) {
 			return
 		}
-		if !checkLocalFileOrFs(c, frontendDist, singleton.Conf.UserTemplate+"/index.html", fallbackStatusCode) {
+		if !checkLocalFileOrFs(c, frontendDist, singleton.Conf.UserTemplate, "index.html", fallbackStatusCode) {
 			c.JSON(http.StatusNotFound, newErrorResponse(errors.New("404 Not Found")))
 		}
 	}

@@ -1,5 +1,6 @@
-# 哪吒面板 (Nezha Dashboard) - 个人编译指南
-这份文档记录了在 Arch Linux 环境下，使用 VS Code Dev Containers 编译自定义主题版本的哪吒面板的完整流程。
+# 哪吒面板 (Nezha Dashboard) - 域名增强定制版
+本项目集成了域名管理（WHOIS/RDAP、Nazhumi 价格同步、到期提醒）、自定义通知系统与 Telegram Bot 交互、自定义 Branding、VPS 到期解析与可视化配置生成等核心功能。
+
 
 ## ⚠️ 核心前置条件 (不做会卡死)
 网络环境：必须开启 TUN 模式 (透明代理)。
@@ -53,7 +54,6 @@ cp -r ./admin-frontend-domain/dist/* ./nezha_domains/cmd/dashboard/admin-dist/
 确保 API 文档和 gRPC 代码是最新的。
 
 ```Bash
-
 # 生成 Swagger 文档
 swag init --pd -d . -g ./cmd/dashboard/main.go -o ./cmd/dashboard/docs --requiredByDefault
 
@@ -64,7 +64,6 @@ protoc --go-grpc_out="require_unimplemented_servers=false:." --go_out="." proto/
 生成可执行文件 dashboard。
 
 ```Bash
-
 # -s -w: 去除调试符号，减小体积
 go build -ldflags="-s -w" -o dashboard cmd/dashboard/main.go
 ```
@@ -72,10 +71,10 @@ go build -ldflags="-s -w" -o dashboard cmd/dashboard/main.go
 编译完成后，运行以下命令测试：
 
 ```Bash
-
 # 运行面板
 ./dashboard
 
 # 如果能看到 Logo 输出，或者提示 config.yaml 不存在，说明编译成功。
 # 如果提示 user-dist 404 之类的，说明前端文件没复制对。
 ```
+

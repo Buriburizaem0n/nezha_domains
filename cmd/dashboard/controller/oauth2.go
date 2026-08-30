@@ -19,13 +19,29 @@ import (
 	"github.com/nezhahq/nezha/service/singleton"
 )
 
+// GHSA-9rc6-8cjv-rcvx: the OAuth2 callback URL is sent to the identity
+// provider and is where the authorization code lands. Deriving it from the
+// raw Host header lets an attacker who can reach this handler with a forged
+// Host (or a provider with loose redirect-URI matching) divert a victim's
+// code to their own origin and bind the victim's identity. A request Host is
+// trusted only when it is an operator-declared dashboard host (the same
+// allowlist that guards NAT routing). Otherwise the redirect is pinned to the
+// operator-declared DashboardHost. Empty DashboardHost intentionally retains
+// dynamic/multi-domain deployments by passing through request Host; those
+// deployments must validate Host at their trusted proxy and register exact
+// redirect URIs at the OAuth provider. GHSA-rf68-8gjr-36q7 documents this
+// configuration boundary and must be updated if this compatibility changes.
 func getRedirectURL(c *gin.Context) string {
 	scheme := "http://"
 	referer := c.Request.Referer()
 	if forwardedProto := c.Request.Header.Get("X-Forwarded-Proto"); forwardedProto == "https" || strings.HasPrefix(referer, "https://") {
 		scheme = "https://"
 	}
-	return scheme + c.Request.Host + "/api/v1/oauth2/callback"
+	host := c.Request.Host
+	if !singleton.IsReservedDashboardHost(host) && singleton.Conf != nil && singleton.Conf.DashboardHost != "" {
+		host = singleton.Conf.DashboardHost
+	}
+	return scheme + host + "/api/v1/oauth2/callback"
 }
 
 // @Summary Get Oauth2 Redirect URL
@@ -66,10 +82,19 @@ func oauth2redirect(c *gin.Context) (*model.Oauth2LoginResponse, error) {
 	}, cache.DefaultExpiration)
 
 	url := o2conf.AuthCodeURL(state, oauth2.AccessTypeOnline)
-	// CodeQL go/cookie-secure-not-set: 根据请求协议动态设置 Secure 属性，避免 HTTP 环境下 Cookie 无法使用
-	c.SetCookie("nz-o2s", stateKey, 60*5, "", "", c.Request.URL.Scheme == "https" || c.Request.TLS != nil, false)
+	writeOauth2StateCookie(c, stateKey)
 
 	return &model.Oauth2LoginResponse{Redirect: url}, nil
+}
+
+// writeOauth2StateCookie sets the nz-o2s cookie used to authenticate the
+// OAuth2 callback. Secure is set when the request arrives over HTTPS;
+// HttpOnly is enabled unconditionally — the frontend does not read this
+// cookie, only the dashboard's callback handler does, so HTTP-only access
+// is strictly an XSS-hardening win.
+func writeOauth2StateCookie(c *gin.Context, stateKey string) {
+	secure := c.Request.URL.Scheme == "https" || c.Request.TLS != nil
+	c.SetCookie("nz-o2s", stateKey, 60*5, "", "", secure, true)
 }
 
 // @Summary Unbind Oauth2
@@ -178,15 +203,21 @@ func oauth2callback(jwtConfig *jwt.GinJWTMiddleware) func(c *gin.Context) (any, 
 			}
 		}
 
-		tokenString, _, err := jwtConfig.TokenGenerator(map[string]interface{}{
-			"user_id": fmt.Sprintf("%d", bind.UserID),
-			"ip":      realip,
-		})
+		var bindUser model.User
+		if err := singleton.DB.First(&bindUser, bind.UserID).Error; err != nil {
+			return nil, newGormError("%v", err)
+		}
+		claims, err := issueJWTSession(c, &bindUser, singleton.Conf.JWTTimeout)
+		if err != nil {
+			return nil, err
+		}
+		tokenString, _, err := jwtConfig.TokenGenerator(claims)
 		if err != nil {
 			return nil, err
 		}
 
 		jwtConfig.SetCookie(c, tokenString)
+		setCSRFCookie(c)
 		c.Redirect(http.StatusFound, utils.IfOr(state.Action == model.RTypeBind, "/dashboard/profile?oauth2=true", "/dashboard/login?oauth2=true"))
 
 		return nil, errNoop

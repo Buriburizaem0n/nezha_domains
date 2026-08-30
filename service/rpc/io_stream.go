@@ -4,97 +4,57 @@ import (
 	"errors"
 	"io"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nezhahq/nezha/service/singleton"
 )
 
+type StreamPurpose uint8
+
+const (
+	PurposeLegacy StreamPurpose = iota
+	PurposeMCPTransfer
+	PurposeTerminal
+	PurposeFileManager
+	PurposeNAT
+)
+
 type ioStreamContext struct {
+	creatorUserID    uint64
+	targetServerID   uint64
+	purpose          StreamPurpose
 	userIo           io.ReadWriteCloser
 	agentIo          io.ReadWriteCloser
 	userIoConnectCh  chan struct{}
 	agentIoConnectCh chan struct{}
 	userIoChOnce     sync.Once
 	agentIoChOnce    sync.Once
+	revokedCh        chan struct{}
+	revokedOnce      sync.Once
+	waitStartedCh    chan struct{}
+	waitStartedOnce  sync.Once
+	startCaptureCh   chan struct{}
+	startCaptureOnce sync.Once
 }
 
-type bp struct {
-	buf []byte
-}
-
-var bufPool = sync.Pool{
-	New: func() any {
-		return &bp{
-			buf: make([]byte, 1024*1024),
-		}
-	},
-}
-
-func (s *NezhaHandler) CreateStream(streamId string) {
-	s.ioStreamMutex.Lock()
-	defer s.ioStreamMutex.Unlock()
-
-	s.ioStreams[streamId] = &ioStreamContext{
-		userIoConnectCh:  make(chan struct{}),
-		agentIoConnectCh: make(chan struct{}),
+func newIOStreamContext(creatorUserID, targetServerID uint64, purpose StreamPurpose) *ioStreamContext {
+	return &ioStreamContext{
+		creatorUserID: creatorUserID, targetServerID: targetServerID, purpose: purpose,
+		userIoConnectCh: make(chan struct{}), agentIoConnectCh: make(chan struct{}),
+		revokedCh: make(chan struct{}), waitStartedCh: make(chan struct{}), startCaptureCh: make(chan struct{}),
 	}
 }
 
-func (s *NezhaHandler) GetStream(streamId string) (*ioStreamContext, error) {
-	s.ioStreamMutex.RLock()
-	defer s.ioStreamMutex.RUnlock()
-
-	if ctx, ok := s.ioStreams[streamId]; ok {
-		return ctx, nil
-	}
-
-	return nil, errors.New("stream not found")
+func (stream *ioStreamContext) revoke() {
+	stream.revokedOnce.Do(func() { close(stream.revokedCh) })
 }
 
-func (s *NezhaHandler) CloseStream(streamId string) error {
-	s.ioStreamMutex.Lock()
-	defer s.ioStreamMutex.Unlock()
+type bp struct{ buf []byte }
 
-	if ctx, ok := s.ioStreams[streamId]; ok {
-		if ctx.userIo != nil {
-			ctx.userIo.Close()
-		}
-		if ctx.agentIo != nil {
-			ctx.agentIo.Close()
-		}
-		delete(s.ioStreams, streamId)
-	}
+var bufPool = sync.Pool{New: func() any { return &bp{buf: make([]byte, 1024*1024)} }}
 
-	return nil
-}
-
-func (s *NezhaHandler) UserConnected(streamId string, userIo io.ReadWriteCloser) error {
-	stream, err := s.GetStream(streamId)
-	if err != nil {
-		return err
-	}
-
-	stream.userIo = userIo
-	stream.userIoChOnce.Do(func() {
-		close(stream.userIoConnectCh)
-	})
-
-	return nil
-}
-
-func (s *NezhaHandler) AgentConnected(streamId string, agentIo io.ReadWriteCloser) error {
-	stream, err := s.GetStream(streamId)
-	if err != nil {
-		return err
-	}
-
-	stream.agentIo = agentIo
-	stream.agentIoChOnce.Do(func() {
-		close(stream.agentIoConnectCh)
-	})
-
-	return nil
+func isValidIOStreamMagic(data []byte) bool {
+	return len(data) >= 4 && data[0] == 0xff && data[1] == 0x05 && data[2] == 0xff && data[3] == 0x05
 }
 
 func (s *NezhaHandler) StartStream(streamId string, timeout time.Duration) error {
@@ -102,64 +62,62 @@ func (s *NezhaHandler) StartStream(streamId string, timeout time.Duration) error
 	if err != nil {
 		return err
 	}
+	return s.startStreamContext(streamId, stream, timeout)
+}
 
+func (s *NezhaHandler) startStreamContext(streamId string, stream *ioStreamContext, timeout time.Duration) error {
 	timeoutTimer := time.NewTimer(timeout)
-
-LOOP:
+	defer timeoutTimer.Stop()
+	userConnected := stream.userIoConnectCh
+	agentConnected := stream.agentIoConnectCh
 	for {
+		s.ioStreamMutex.RLock()
+		if current, exists := s.ioStreams[streamId]; !exists || current != stream {
+			s.ioStreamMutex.RUnlock()
+			return errors.New("stream revoked")
+		}
+		userIo, agentIo := stream.userIo, stream.agentIo
+		s.ioStreamMutex.RUnlock()
+		stream.startCaptureOnce.Do(func() { close(stream.startCaptureCh) })
+		if userIo != nil {
+			userConnected = nil
+		}
+		if agentIo != nil {
+			agentConnected = nil
+		}
+		if userIo != nil && agentIo != nil {
+			break
+		}
 		select {
-		case <-stream.userIoConnectCh:
-			if stream.agentIo != nil {
-				timeoutTimer.Stop()
-				break LOOP
-			}
-		case <-stream.agentIoConnectCh:
-			if stream.userIo != nil {
-				timeoutTimer.Stop()
-				break LOOP
-			}
-		case <-time.After(timeout):
-			break LOOP
+		case <-userConnected:
+			userConnected = nil
+		case <-agentConnected:
+			agentConnected = nil
+		case <-stream.revokedCh:
+			return errors.New("stream revoked")
+		case <-timeoutTimer.C:
+			return singleton.Localizer.ErrorT("timeout: stream endpoints not established")
 		}
-		time.Sleep(time.Millisecond * 500)
 	}
-
-	if stream.userIo == nil && stream.agentIo == nil {
-		return singleton.Localizer.ErrorT("timeout: no connection established")
+	s.ioStreamMutex.RLock()
+	if current, exists := s.ioStreams[streamId]; !exists || current != stream {
+		s.ioStreamMutex.RUnlock()
+		return errors.New("stream revoked")
 	}
-	if stream.userIo == nil {
-		return singleton.Localizer.ErrorT("timeout: user connection not established")
-	}
-	if stream.agentIo == nil {
-		return singleton.Localizer.ErrorT("timeout: agent connection not established")
-	}
-
-	isDone := new(atomic.Bool)
-	endCh := make(chan struct{})
-
+	userIo, agentIo := stream.userIo, stream.agentIo
+	s.ioStreamMutex.RUnlock()
+	errCh := make(chan error, 2)
 	go func() {
 		bp := bufPool.Get().(*bp)
 		defer bufPool.Put(bp)
-		_, innerErr := io.CopyBuffer(stream.userIo, stream.agentIo, bp.buf)
-		if innerErr != nil {
-			err = innerErr
-		}
-		if isDone.CompareAndSwap(false, true) {
-			close(endCh)
-		}
+		_, copyErr := io.CopyBuffer(userIo, agentIo, bp.buf)
+		errCh <- copyErr
 	}()
 	go func() {
 		bp := bufPool.Get().(*bp)
 		defer bufPool.Put(bp)
-		_, innerErr := io.CopyBuffer(stream.agentIo, stream.userIo, bp.buf)
-		if innerErr != nil {
-			err = innerErr
-		}
-		if isDone.CompareAndSwap(false, true) {
-			close(endCh)
-		}
+		_, copyErr := io.CopyBuffer(agentIo, userIo, bp.buf)
+		errCh <- copyErr
 	}()
-
-	<-endCh
-	return err
+	return <-errCh
 }

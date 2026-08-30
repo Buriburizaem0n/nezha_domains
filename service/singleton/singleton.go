@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"sigs.k8s.io/yaml"
 
@@ -34,6 +33,10 @@ var (
 	NotificationShared    *NotificationClass
 	NATShared             *NATClass
 	CronShared            *CronClass
+	// ServerTransferShared is initialized in LoadSingleton AFTER ServerShared
+	// (so the in-memory pending index can write back into ServerShared.UserID
+	// on transitions) and AFTER initUser (so PushIfOnline can read secrets
+	// from UserInfoMap).
 )
 
 //go:embed frontend-templates.yaml
@@ -59,6 +62,7 @@ func LoadSingleton(bus chan<- *model.Service) (err error) {
 	NotificationShared = NewNotificationClass()
 	ServerShared = NewServerClass()
 	CronShared = NewCronClass()
+	ServerTransferShared = NewServerTransferClass()
 	// 最后初始化 ServiceSentinel
 	ServiceSentinelShared, err = NewServiceSentinel(bus)
 	if err == nil {
@@ -79,7 +83,7 @@ func InitFrontendTemplates() error {
 // InitDBFromPath 从给出的文件路径中加载数据库
 func InitDBFromPath(path string) error {
 	var err error
-	DB, err = gorm.Open(sqlite.Open(path), &gorm.Config{
+	DB, err = gorm.Open(openSQLiteDialector(path), &gorm.Config{
 		CreateBatchSize: 200,
 	})
 	if err != nil {
@@ -92,9 +96,20 @@ func InitDBFromPath(path string) error {
 		model.Notification{}, model.AlertRule{}, model.Service{}, model.NotificationGroupNotification{},
 		model.Cron{}, model.Transfer{}, model.ServerGroupServer{},
 		model.NAT{}, model.DDNSProfile{}, model.NotificationGroupNotification{},
-		model.WAF{}, model.Oauth2Bind{}, model.Domain{})
+		model.WAF{}, model.Oauth2Bind{}, model.Domain{}, model.ServerTransfer{}, model.JWTSession{},
+		model.APIToken{}, model.MCPAuditLog{})
+
 	if err != nil {
 		return err
+	}
+
+	// 旧 mcp:* scope 与 nezha:* 并行了一段时间，HasScope 通过别名让 mcp:fs:write
+	// 静默扩到 REST nezha:server:write。统一命名后这里把残留旧 scope 一次性
+	// 归一化（或在仅剩危险旧 scope 时整张 PAT 删除），保证运行时不再依赖别名。
+	if rewritten, deleted, mErr := model.MigrateLegacyMCPScopes(DB); mErr != nil {
+		log.Printf("NEZHA>> MigrateLegacyMCPScopes failed: %v", mErr)
+	} else if rewritten > 0 || deleted > 0 {
+		log.Printf("NEZHA>> Migrated legacy mcp:* api token scopes: rewritten=%d deleted=%d", rewritten, deleted)
 	}
 
 	return nil
@@ -114,16 +129,15 @@ func RecordTransferHourlyUsage(servers ...*model.Server) {
 	}
 
 	for server := range slist {
+		_, _, deltaIn, deltaOut := server.TransferDeltaAndAdvance()
 		tx := model.Transfer{
 			ServerID: server.ID,
-			In:       utils.SubUintChecked(server.State.NetInTransfer, server.PrevTransferInSnapshot),
-			Out:      utils.SubUintChecked(server.State.NetOutTransfer, server.PrevTransferOutSnapshot),
+			In:       deltaIn,
+			Out:      deltaOut,
 		}
 		if tx.In == 0 && tx.Out == 0 {
 			continue
 		}
-		server.PrevTransferInSnapshot = server.State.NetInTransfer
-		server.PrevTransferOutSnapshot = server.State.NetOutTransfer
 		tx.CreatedAt = nowTrimSeconds
 		txs = append(txs, tx)
 	}
@@ -132,6 +146,13 @@ func RecordTransferHourlyUsage(servers ...*model.Server) {
 		return
 	}
 	log.Printf("NEZHA>> Saved traffic metrics to database. Affected %d row(s), Error: %v", len(txs), DB.Create(txs).Error)
+}
+
+func PersistTransfer(transfer model.Transfer) error {
+	if transfer.In == 0 && transfer.Out == 0 {
+		return nil
+	}
+	return DB.Create(&transfer).Error
 }
 
 // CleanMonitorHistory 清理流量记录（TSDB 有自己的保留策略）
@@ -143,7 +164,10 @@ func CleanMonitorHistory() {
 	specialServerKeep := make(map[uint64]time.Time)
 	var specialServerIDs []uint64
 	var alerts []model.AlertRule
-	DB.Find(&alerts)
+	if err := DB.Find(&alerts).Error; err != nil {
+		log.Printf("NEZHA>> Failed to load alert rules while cleaning transfer history: %v", err)
+		return
+	}
 	for _, alert := range alerts {
 		for _, rule := range alert.Rules {
 			// 是不是流量记录规则
@@ -170,6 +194,14 @@ func CleanMonitorHistory() {
 	}
 	for id, couldRemove := range specialServerKeep {
 		DB.Unscoped().Delete(&model.Transfer{}, "server_id = ? AND datetime(`created_at`) < datetime(?)", id, couldRemove)
+	}
+	if len(specialServerIDs) == 0 {
+		if allServerKeep.IsZero() {
+			DB.Unscoped().Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&model.Transfer{})
+		} else {
+			DB.Unscoped().Delete(&model.Transfer{}, "datetime(`created_at`) < datetime(?)", allServerKeep)
+		}
+		return
 	}
 	if allServerKeep.IsZero() {
 		DB.Unscoped().Delete(&model.Transfer{}, "server_id NOT IN (?)", specialServerIDs)

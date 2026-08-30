@@ -149,13 +149,13 @@ func checkStatus() {
 				role = u.Role
 			}
 			UserLock.RUnlock()
-			if alert.UserID != server.UserID && !role.IsAdmin() {
+			if alert.UserID != server.GetUserID() && !role.IsAdmin() {
 				continue
 			}
 			alertsStore[alert.ID][server.ID] = append(alertsStore[alert.
 				ID][server.ID], alert.Snapshot(AlertsCycleTransferStatsStore[alert.ID], server, DB))
 			// 发送通知，分为触发报警和恢复通知
-			max, passed := alert.Check(alertsStore[alert.ID][server.ID])
+			_, passed := alert.Check(alertsStore[alert.ID][server.ID])
 			// 保存当前服务器状态信息
 			curServer := model.Server{}
 			copier.Copy(&curServer, server)
@@ -167,7 +167,7 @@ func checkStatus() {
 					alertsPrevState[alert.ID][server.ID] = _RuleCheckFail
 					message := fmt.Sprintf("[%s] %s(%s) %s", Localizer.T("Incident"),
 						server.Name, IPDesensitize(server.GeoIP.IP.Join()), alert.Name)
-					go CronShared.SendTriggerTasks(alert.FailTriggerTasks, curServer.ID)
+					go CronShared.SendTriggerTasks(alert.FailTriggerTasks, curServer.ID, alert.UserID)
 					go NotificationShared.SendNotification(alert.NotificationGroupID, message, NotificationMuteLabel.ServerIncident(server.ID, alert.ID), &curServer)
 					// 清除恢复通知的静音缓存
 					NotificationShared.UnMuteNotification(alert.NotificationGroupID, NotificationMuteLabel.ServerIncidentResolved(server.ID, alert.ID))
@@ -177,17 +177,22 @@ func checkStatus() {
 				if alertsPrevState[alert.ID][server.ID] == _RuleCheckFail {
 					message := fmt.Sprintf("[%s] %s(%s) %s", Localizer.T("Resolved"),
 						server.Name, IPDesensitize(server.GeoIP.IP.Join()), alert.Name)
-					go CronShared.SendTriggerTasks(alert.RecoverTriggerTasks, curServer.ID)
+					go CronShared.SendTriggerTasks(alert.RecoverTriggerTasks, curServer.ID, alert.UserID)
 					go NotificationShared.SendNotification(alert.NotificationGroupID, message, NotificationMuteLabel.ServerIncidentResolved(server.ID, alert.ID), &curServer)
 					// 清除失败通知的静音缓存
 					NotificationShared.UnMuteNotification(alert.NotificationGroupID, NotificationMuteLabel.ServerIncident(server.ID, alert.ID))
 				}
 				alertsPrevState[alert.ID][server.ID] = _RuleCheckPass
 			}
-			// 清理旧数据
-			if max > 0 && max < len(alertsStore[alert.ID][server.ID]) {
-				index := len(alertsStore[alert.ID][server.ID]) - max
-				alertsStore[alert.ID][server.ID] = alertsStore[alert.ID][server.ID][index:]
+			// 清理旧数据：保留窗口由规则定义决定（各规则 Duration 的最大值），
+			// 而非 Check 的判定结果。window==0 表示没有任何有效规则需要回看历史
+			// （例如全部 Duration<=0），此时清空采样避免切片无限增长。
+			window := alert.RetentionWindow()
+			samples := alertsStore[alert.ID][server.ID]
+			if window <= 0 {
+				alertsStore[alert.ID][server.ID] = samples[:0]
+			} else if window < len(samples) {
+				alertsStore[alert.ID][server.ID] = samples[len(samples)-window:]
 			}
 		}
 	}

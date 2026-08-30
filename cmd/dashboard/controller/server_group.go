@@ -27,10 +27,12 @@ func listServerGroup(c *gin.Context) ([]*model.ServerGroupResponseItem, error) {
 	}
 
 	_, isMember := c.Get(model.CtxKeyAuthorizedUser)
-	authorized := isMember
+	isAdmin := isMember && callerIsAdmin(c)
+	pat := patAccessorFromContext(c)
+	patLimited := pat != nil && patHasServerWhitelist(c)
 
 	visibleServerIDs := make(map[uint64]struct{})
-	if !authorized {
+	if !isMember {
 		for _, server := range singleton.ServerShared.GetSortedListForGuest() {
 			visibleServerIDs[server.ID] = struct{}{}
 		}
@@ -42,10 +44,13 @@ func listServerGroup(c *gin.Context) ([]*model.ServerGroupResponseItem, error) {
 		return nil, err
 	}
 	for _, s := range sgs {
-		if !authorized {
+		if !isMember {
 			if _, ok := visibleServerIDs[s.ServerId]; !ok {
 				continue
 			}
+		}
+		if pat != nil && !pat.CanAccessServer(s.ServerId) {
+			continue
 		}
 		if _, ok := groupServers[s.ServerGroupId]; !ok {
 			groupServers[s.ServerGroupId] = make([]uint64, 0)
@@ -55,6 +60,15 @@ func listServerGroup(c *gin.Context) ([]*model.ServerGroupResponseItem, error) {
 
 	var sgRes []*model.ServerGroupResponseItem
 	for _, s := range sg {
+		if isMember && !isAdmin && !s.HasPermission(c) {
+			continue
+		}
+		if !isMember && len(groupServers[s.ID]) == 0 {
+			continue
+		}
+		if patLimited && len(groupServers[s.ID]) == 0 {
+			continue
+		}
 		sgRes = append(sgRes, &model.ServerGroupResponseItem{
 			Group:   s,
 			Servers: groupServers[s.ID],
@@ -163,6 +177,10 @@ func updateServerGroup(c *gin.Context) (any, error) {
 		return nil, singleton.Localizer.ErrorT("unauthorized")
 	}
 
+	if !patGroupMembershipAccessAllowed(c, sgDB.ID) {
+		return nil, singleton.Localizer.ErrorT("permission denied")
+	}
+
 	sgDB.Name = sg.Name
 
 	var count int64
@@ -228,6 +246,18 @@ func batchDeleteServerGroup(c *gin.Context) (any, error) {
 	for _, s := range sg {
 		if !s.HasPermission(c) {
 			return nil, singleton.Localizer.ErrorT("permission denied")
+		}
+	}
+
+	if pat := patAccessorFromContext(c); pat != nil && patHasServerWhitelist(c) {
+		var members []model.ServerGroupServer
+		if err := singleton.DB.Where("server_group_id in (?)", sgs).Find(&members).Error; err != nil {
+			return nil, err
+		}
+		for _, m := range members {
+			if !pat.CanAccessServer(m.ServerId) {
+				return nil, singleton.Localizer.ErrorT("permission denied")
+			}
 		}
 	}
 

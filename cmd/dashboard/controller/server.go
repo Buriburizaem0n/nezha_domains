@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"slices"
 	"strconv"
 	"sync"
@@ -8,7 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/goccy/go-json"
-	"github.com/jinzhu/copier"
 	"gorm.io/gorm"
 
 	"github.com/nezhahq/nezha/model"
@@ -20,8 +20,9 @@ import (
 // List server
 // @Summary List server
 // @Security BearerAuth
+// @Security APITokenAuth
 // @Schemes
-// @Description List server
+// @Description List server. PAT scope required: nezha:inventory:read.
 // @Tags auth required
 // @Param id query uint false "Resource ID"
 // @Produce json
@@ -29,10 +30,13 @@ import (
 // @Router /server [get]
 func listServer(c *gin.Context) ([]*model.Server, error) {
 	slist := singleton.ServerShared.GetSortedList()
-
-	var ssl []*model.Server
-	if err := copier.Copy(&ssl, &slist); err != nil {
-		return nil, err
+	ssl := make([]*model.Server, 0, len(slist))
+	for _, server := range slist {
+		if server == nil {
+			continue
+		}
+		runtime := server.RuntimeSnapshot()
+		ssl = append(ssl, server.RuntimeCopy(runtime))
 	}
 	return ssl, nil
 }
@@ -153,6 +157,14 @@ func batchDeleteServer(c *gin.Context) (any, error) {
 	singleton.DB.Unscoped().Delete(&model.Transfer{}, "server_id in (?)", servers)
 	singleton.AlertsLock.Unlock()
 
+	// Cancel any in-flight transfers BEFORE the in-memory ServerShared
+	// entry is dropped: the order shortens the window in which a
+	// concurrent Retry/Register could install a fresh pending entry for
+	// the same serverID and have it wiped by the cleanup. The
+	// transferID-guarded delete inside OnServersDeleted is the
+	// authoritative protection against that race; the ordering here is
+	// belt and braces.
+	singleton.ServerTransferShared.OnServersDeleted(servers)
 	singleton.ServerShared.Delete(servers)
 	return nil, nil
 }
@@ -178,14 +190,24 @@ func forceUpdateServer(c *gin.Context) (*model.ServerTaskResponse, error) {
 
 	for _, sid := range forceUpdateServers {
 		server, _ := singleton.ServerShared.Get(sid)
-		if server != nil && server.TaskStream != nil {
-			if !server.HasPermission(c) {
-				return nil, singleton.Localizer.ErrorT("permission denied")
-			}
-			if err := server.TaskStream.Send(&pb.Task{
+		// Per-ID ownership check. Foreign servers (online or offline) and
+		// unknown IDs MUST be indistinguishable in the response — otherwise the
+		// response shape leaks server-ID existence/online-state, letting a
+		// RoleMember enumerate other users' machines. We drop them into the
+		// Offline bucket without actually dispatching the upgrade task.
+		if server == nil || !server.HasPermission(c) {
+			forceUpdateResp.Offline = append(forceUpdateResp.Offline, sid)
+			continue
+		}
+		if server.GetTaskStream() != nil {
+			if err := server.SendTask(&pb.Task{
 				Type: model.TaskTypeUpgrade,
 			}); err != nil {
-				forceUpdateResp.Failure = append(forceUpdateResp.Failure, sid)
+				if errors.Is(err, model.ErrTaskStreamOffline) {
+					forceUpdateResp.Offline = append(forceUpdateResp.Offline, sid)
+				} else {
+					forceUpdateResp.Failure = append(forceUpdateResp.Failure, sid)
+				}
 			} else {
 				forceUpdateResp.Success = append(forceUpdateResp.Success, sid)
 			}
@@ -214,17 +236,22 @@ func getServerConfig(c *gin.Context) (string, error) {
 	}
 
 	s, ok := singleton.ServerShared.Get(id)
-	if !ok || s.TaskStream == nil {
+	if !ok {
 		return "", nil
 	}
-
 	if !s.HasPermission(c) {
 		return "", singleton.Localizer.ErrorT("permission denied")
 	}
+	if s.GetTaskStream() == nil {
+		return "", nil
+	}
 
-	if err := s.TaskStream.Send(&pb.Task{
+	if err := s.SendTask(&pb.Task{
 		Type: model.TaskTypeReportConfig,
 	}); err != nil {
+		if errors.Is(err, model.ErrTaskStreamOffline) {
+			return "", nil
+		}
 		return "", err
 	}
 
@@ -270,7 +297,7 @@ func setServerConfig(c *gin.Context) (*model.ServerTaskResponse, error) {
 			if !s.HasPermission(c) {
 				return nil, singleton.Localizer.ErrorT("permission denied")
 			}
-			if s.TaskStream == nil {
+			if s.GetTaskStream() == nil {
 				resp.Offline = append(resp.Offline, s.ID)
 				continue
 			}
@@ -289,14 +316,23 @@ func setServerConfig(c *gin.Context) (*model.ServerTaskResponse, error) {
 		go func(srvGroup []*model.Server) {
 			defer wg.Done()
 			for _, s := range srvGroup {
-				// Create and send the task.
 				task := &pb.Task{
 					Type: model.TaskTypeApplyConfig,
 					Data: configForm.Config,
 				}
-				if err := s.TaskStream.Send(task); err != nil {
+				if s.GetTaskStream() == nil {
 					respMu.Lock()
-					resp.Failure = append(resp.Failure, s.ID)
+					resp.Offline = append(resp.Offline, s.ID)
+					respMu.Unlock()
+					continue
+				}
+				if err := s.SendTask(task); err != nil {
+					respMu.Lock()
+					if errors.Is(err, model.ErrTaskStreamOffline) {
+						resp.Offline = append(resp.Offline, s.ID)
+					} else {
+						resp.Failure = append(resp.Failure, s.ID)
+					}
 					respMu.Unlock()
 					continue
 				}
@@ -315,57 +351,124 @@ func setServerConfig(c *gin.Context) (*model.ServerTaskResponse, error) {
 // @Summary Batch move servers to other user
 // @Security BearerAuth
 // @Schemes
-// @Description Batch move servers to other user
+// @Description Initiates one ServerTransfer per requested server and returns a
+// @Description per-server result. The old behaviour flipped Server.UserID in
+// @Description a single SQL UPDATE without telling the agent, so the agent
+// @Description kept presenting its old AgentSecret — which now belonged to a
+// @Description different user — and authorizeAgentForUUID dropped it. The
+// @Description current flow writes a Pending ServerTransfer row and flips
+// @Description Server.UserID to the target owner immediately; that row keeps
+// @Description the old owner's AgentSecret acceptable for this UUID until the
+// @Description agent reconnects under the new secret (MarkVerified clears the
+// @Description pending window) or the transfer Cancel/Fail/Timeout-out and
+// @Description reverts Server.UserID to the source owner.
 // @Tags auth required
 // @Accept json
 // @Param request body model.BatchMoveServerForm true "BatchMoveServerForm"
 // @Produce json
-// @Success 200 {object} model.CommonResponse[any]
+// @Success 200 {object} model.CommonResponse[[]model.BatchMoveServerResult]
 // @Router /batch-move/server [post]
-func batchMoveServer(c *gin.Context) (any, error) {
+func batchMoveServer(c *gin.Context) ([]model.BatchMoveServerResult, error) {
 	var moveForm model.BatchMoveServerForm
 	if err := c.ShouldBindJSON(&moveForm); err != nil {
 		return nil, err
-	}
-
-	if !singleton.ServerShared.CheckPermission(c, slices.Values(moveForm.Ids)) {
-		return nil, singleton.Localizer.ErrorT("permission denied")
 	}
 
 	if moveForm.ToUser == 0 {
 		return nil, singleton.Localizer.ErrorT("user id is required")
 	}
 
+	if !callerIsAdmin(c) && moveForm.ToUser != getUid(c) {
+		return nil, singleton.Localizer.ErrorT("permission denied")
+	}
+
 	singleton.UserLock.RLock()
-	defer singleton.UserLock.RUnlock()
-	if _, ok := singleton.UserInfoMap[moveForm.ToUser]; !ok {
+	_, toUserExists := singleton.UserInfoMap[moveForm.ToUser]
+	singleton.UserLock.RUnlock()
+	if !toUserExists {
 		return nil, singleton.Localizer.ErrorT("user id %d does not exist", moveForm.ToUser)
 	}
 
-	err := singleton.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&model.Server{}).Where("id in (?)", moveForm.Ids).Update("user_id", moveForm.ToUser).Error; err != nil {
-			return err
-		}
-		return nil
-	})
+	results := make([]model.BatchMoveServerResult, 0, len(moveForm.Ids))
+	uid := getUid(c)
+	isAdmin := callerIsAdmin(c)
 
-	if err != nil {
-		return nil, newGormError("%v", err)
-	}
+	for _, sid := range moveForm.Ids {
+		res := model.BatchMoveServerResult{ServerID: sid}
 
-	idsMap := make(map[uint64]bool)
-	for _, id := range moveForm.Ids {
-		idsMap[id] = true
-	}
-
-	for _, s := range singleton.ServerShared.Range {
-		if s == nil || !idsMap[s.ID] {
+		srv, ok := singleton.ServerShared.Get(sid)
+		if !ok || srv == nil {
+			res.Status = model.BatchMoveServerResultServerNotFound
+			results = append(results, res)
 			continue
 		}
-		s.UserID = moveForm.ToUser
+
+		// PAT server_ids 白名单优先于 admin/owner 早返回：admin 给自己签发的
+		// 限定 server_ids PAT 必须只能 move 白名单内 server。前面的 admin/owner
+		// 检查只看 currentOwner，不会触达白名单，这里显式补一道。返回
+		// ServerNotFound 与未知/外部 server 的语义对齐，避免泄露白名单外
+		// server 是否存在。
+		if !patAllowsServer(c, sid) {
+			res.Status = model.BatchMoveServerResultServerNotFound
+			results = append(results, res)
+			continue
+		}
+
+		// Per-server permission: admin or current owner. We do NOT use the
+		// bulk CheckPermission because we want a partial-success response
+		// rather than rejecting the whole batch on the first unauthorized id.
+		//
+		// 必须走 GetUserID() 而不是裸读 srv.UserID — ServerTransfer.Register
+		// 和 revertTransition 会通过 atomic.StoreUint64 改写当前 Server.UserID
+		// 以反映新所有者。batchMoveServer 与 transfer 流程并发时（典型场景：两
+		// 个 operator 几乎同时发起 move），裸读会与 SetUserID 形成 data race，
+		// 且可能在 transfer 切换瞬间读到过期值并据此做权限/同所有者/fromUser
+		// 判断。
+		currentOwner := srv.GetUserID()
+		if !isAdmin && currentOwner != uid {
+			// Match the unknown-id response for members. A distinct
+			// permission_denied result lets callers enumerate foreign server IDs.
+			res.Status = model.BatchMoveServerResultServerNotFound
+			results = append(results, res)
+			continue
+		}
+
+		if currentOwner == moveForm.ToUser {
+			res.Status = model.BatchMoveServerResultSameOwner
+			results = append(results, res)
+			continue
+		}
+
+		// One active ServerTransfer per server. InitiateExclusive serializes
+		// the HasPending guard, the DB transaction, and the in-memory
+		// Register under a per-server claim so two concurrent operators
+		// can't both observe "no pending", both insert, and silently end up
+		// with two Pending rows for the same server.
+		fromUser := currentOwner
+		created, err := singleton.ServerTransferShared.InitiateExclusive(sid, fromUser, moveForm.ToUser, uid)
+		if err != nil {
+			switch {
+			case errors.Is(err, singleton.ErrServerAlreadyTransferring):
+				res.Status = model.BatchMoveServerResultAlreadyTransferring
+			case errors.Is(err, singleton.ErrAgentTooOldForTransfer):
+				res.Status = model.BatchMoveServerResultAgentTooOld
+				res.Error = err.Error()
+			default:
+				res.Status = model.BatchMoveServerResultServerNotFound
+				res.Error = err.Error()
+			}
+			results = append(results, res)
+			continue
+		}
+
+		singleton.ServerTransferShared.PushIfOnline(created)
+
+		res.Status = model.BatchMoveServerResultPending
+		res.TransferID = created.ID
+		results = append(results, res)
 	}
 
-	return nil, nil
+	return results, nil
 }
 
 var serverMetricMap = map[string]tsdb.MetricType{
@@ -412,10 +515,10 @@ func getServerMetrics(c *gin.Context) (*model.ServerMetricsResponse, error) {
 		return nil, singleton.Localizer.ErrorT("server not found")
 	}
 
-	_, isMember := c.Get(model.CtxKeyAuthorizedUser)
-	if server.HideForGuest && !isMember {
+	if !userCanViewServer(c, server) {
 		return nil, singleton.Localizer.ErrorT("unauthorized")
 	}
+	_, isMember := c.Get(model.CtxKeyAuthorizedUser)
 
 	metricName := c.Query("metric")
 	metricType, ok := serverMetricMap[metricName]

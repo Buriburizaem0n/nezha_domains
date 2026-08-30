@@ -1,10 +1,13 @@
 package model
 
 import (
+	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nezhahq/nezha/pkg/utils"
 )
 
 var (
@@ -77,7 +80,6 @@ func execCase(t *testing.T, item testSt) {
 			CountryCode: "",
 		},
 		LastActive:              time.Time{},
-		TaskStream:              nil,
 		PrevTransferInSnapshot:  0,
 		PrevTransferOutSnapshot: 0,
 	}
@@ -232,5 +234,137 @@ func TestNotification(t *testing.T) {
 
 	for _, c := range cases {
 		execCase(t, c)
+	}
+}
+
+func TestNotificationResponseErrorDoesNotReflectNonSuccessResponseBody(t *testing.T) {
+	const internalResponseBody = "internal service says token=secret"
+
+	resp := &http.Response{
+		StatusCode: http.StatusTeapot,
+		Status:     "418 I'm a teapot",
+		Body:       io.NopCloser(strings.NewReader(internalResponseBody)),
+	}
+
+	err := notificationResponseError(resp)
+	if strings.Contains(err.Error(), internalResponseBody) {
+		t.Fatalf("expected upstream response body to be hidden from error, got %q", err.Error())
+	}
+}
+
+func TestNotificationSendRejectsLoopbackTarget(t *testing.T) {
+	verifyTLS := true
+	notification := &Notification{
+		URL:           "http://127.0.0.1/internal",
+		RequestMethod: NotificationRequestMethodGET,
+		VerifyTLS:     &verifyTLS,
+	}
+
+	bundle := NotificationServerBundle{
+		Notification: notification,
+		Loc:          time.Local,
+	}
+
+	err := bundle.Send("probe")
+	if err == nil {
+		t.Fatal("expected loopback notification URL to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected not allowed error, got %q", err.Error())
+	}
+}
+
+func TestNotificationTargetRejectsBlockedRanges(t *testing.T) {
+	cases := []string{
+		"http://0.0.0.0/",
+		"http://10.1.2.3/",
+		"http://100.64.0.1/",
+		"http://127.0.0.1/",
+		"http://127.255.255.254/",
+		"http://169.254.169.254/",
+		"http://172.16.0.1/",
+		"http://192.0.0.1/",
+		"http://192.0.2.1/",
+		"http://192.168.1.1/",
+		"http://198.18.0.1/",
+		"http://198.51.100.1/",
+		"http://203.0.113.1/",
+		"http://224.0.0.1/",
+		"http://240.0.0.1/",
+		"http://[::]/",
+		"http://[::1]/",
+		"http://[::ffff:127.0.0.1]/",
+		"http://[64:ff9b::1]/",
+		"http://[100::1]/",
+		"http://[2001:0:0:0:0:0:0:1]/",
+		"http://[2001:db8::1]/",
+		"http://[fc00::1]/",
+		"http://[fe80::1]/",
+		"http://[ff00::1]/",
+		"ftp://example.com/",
+		"file:///etc/passwd",
+		"http:///path",
+	}
+
+	for _, rawURL := range cases {
+		t.Run(rawURL, func(t *testing.T) {
+			if _, _, err := utils.ResolveAllowedHTTPURL(rawURL); err == nil {
+				t.Fatalf("expected %s to be rejected", rawURL)
+			}
+		})
+	}
+}
+
+func TestNotificationTargetAllowsPublicAddresses(t *testing.T) {
+	cases := []string{
+		"http://1.1.1.1/path",
+		"https://8.8.8.8/",
+		"https://[2606:4700:4700::1111]/",
+	}
+
+	for _, rawURL := range cases {
+		t.Run(rawURL, func(t *testing.T) {
+			parsedURL, _, err := utils.ResolveAllowedHTTPURL(rawURL)
+			if err != nil {
+				t.Fatalf("expected %s to be allowed, got %v", rawURL, err)
+			}
+			if parsedURL == nil {
+				t.Fatalf("expected parsed url for %s", rawURL)
+			}
+		})
+	}
+}
+
+func TestNotificationHTTPClientInvertsVerifyTLSFlag(t *testing.T) {
+	// newNotificationHTTPClient takes verifyTLS, utils.NewRestrictedHTTPClient
+	// takes skipVerifyTLS. The wrapper must invert the boolean; if a future
+	// refactor drops the negation, TLS verification silently turns off.
+	// SNI / redirect / IP-pinning are covered by pkg/utils/http_test.go.
+	cases := []struct {
+		name             string
+		verifyTLS        bool
+		wantSkipVerifyOn bool
+	}{
+		{"verifyTLS_true_means_skipVerify_false", true, false},
+		{"verifyTLS_false_means_skipVerify_true", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := newNotificationHTTPClient("https://1.1.1.1/webhook", tc.verifyTLS)
+			if err != nil {
+				t.Fatalf("expected client construction: %v", err)
+			}
+			transport, ok := client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("expected *http.Transport, got %T", client.Transport)
+			}
+			if transport.TLSClientConfig == nil {
+				t.Fatalf("expected TLSClientConfig to be set")
+			}
+			if got := transport.TLSClientConfig.InsecureSkipVerify; got != tc.wantSkipVerifyOn {
+				t.Fatalf("verifyTLS=%v: expected InsecureSkipVerify=%v, got %v",
+					tc.verifyTLS, tc.wantSkipVerifyOn, got)
+			}
+		})
 	}
 }

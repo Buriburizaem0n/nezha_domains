@@ -6,6 +6,7 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/nezhahq/nezha/model"
 	"github.com/nezhahq/nezha/pkg/ddns"
@@ -14,6 +15,10 @@ import (
 
 type ServerClass struct {
 	class[uint64, *model.Server]
+
+	// lifecycleMu serializes changes to the authoritative server entries with
+	// synchronous ServiceSentinel report processing.
+	lifecycleMu sync.RWMutex
 
 	uuidToID map[string]uint64
 
@@ -30,18 +35,67 @@ func NewServerClass() *ServerClass {
 
 	var servers []model.Server
 	DB.Find(&servers)
-	for _, s := range servers {
-		innerS := s
-		model.InitServer(&innerS)
-		sc.list[innerS.ID] = &innerS
+	for i := range servers {
+		innerS := &servers[i]
+		model.InitServer(innerS)
+		sc.list[innerS.ID] = innerS
 		sc.uuidToID[innerS.UUID] = innerS.ID
 	}
 	sc.sortList()
 
+	model.OwnerServerIDsLookup = sc.ownerServerIDs
+	model.AllServerIDsLookup = sc.allServerIDs
+	model.OwnerIsAdminLookup = ownerIsAdmin
+
 	return sc
 }
 
+func (c *ServerClass) ownerServerIDs(ownerUID uint64) []uint64 {
+	var ids []uint64
+	c.Range(func(id uint64, s *model.Server) bool {
+		if s != nil && s.GetUserID() == ownerUID {
+			ids = append(ids, id)
+		}
+		return true
+	})
+	return ids
+}
+
+func (c *ServerClass) allServerIDs() []uint64 {
+	var ids []uint64
+	c.Range(func(id uint64, s *model.Server) bool {
+		if s != nil {
+			ids = append(ids, id)
+		}
+		return true
+	})
+	return ids
+}
+
+func ownerIsAdmin(ownerUID uint64) bool {
+	return userIsAdmin(ownerUID)
+}
+
+func (c *ServerClass) lockLifecycleRead() {
+	c.lifecycleMu.RLock()
+}
+
+func (c *ServerClass) unlockLifecycleRead() {
+	c.lifecycleMu.RUnlock()
+}
+
+func (c *ServerClass) lockLifecycleWrite() {
+	c.lifecycleMu.Lock()
+}
+
+func (c *ServerClass) unlockLifecycleWrite() {
+	c.lifecycleMu.Unlock()
+}
+
 func (c *ServerClass) Update(s *model.Server, uuid string) {
+	c.lockLifecycleWrite()
+	defer c.unlockLifecycleWrite()
+
 	c.listMu.Lock()
 
 	c.list[s.ID] = s
@@ -61,17 +115,34 @@ func (c *ServerClass) Update(s *model.Server, uuid string) {
 }
 
 func (c *ServerClass) Delete(idList []uint64) {
+	c.lockLifecycleWrite()
+	defer c.unlockLifecycleWrite()
+
 	c.listMu.Lock()
 
 	for _, id := range idList {
-		serverUUID := c.list[id].UUID
-		delete(c.uuidToID, serverUUID)
+		s, ok := c.list[id]
+		if !ok {
+			continue
+		}
+		delete(c.uuidToID, s.UUID)
 		delete(c.list, id)
 	}
 
 	c.listMu.Unlock()
 
 	c.sortList()
+}
+
+// setUserID updates in-memory ownership under the server lifecycle lock so a
+// transfer cannot change authorization during synchronous report processing.
+func (c *ServerClass) setUserID(id, userID uint64) {
+	c.lockLifecycleWrite()
+	defer c.unlockLifecycleWrite()
+
+	if s, ok := c.Get(id); ok && s != nil {
+		s.SetUserID(userID)
+	}
 }
 
 func (c *ServerClass) GetSortedListForGuest() []*model.Server {
@@ -93,7 +164,7 @@ func (c *ServerClass) UpdateDDNS(server *model.Server, ip *model.IP) error {
 	confServers := strings.Split(Conf.DNSServers, ",")
 	ctx := context.WithValue(context.Background(), ddns.DNSServerKey{}, utils.IfOr(confServers[0] != "", confServers, utils.DNSServers))
 
-	providers, err := DDNSShared.GetDDNSProvidersFromProfiles(server.DDNSProfiles, utils.IfOr(ip != nil, ip, &server.GeoIP.IP))
+	providers, err := DDNSShared.GetDDNSProvidersFromProfiles(server.DDNSProfiles, utils.IfOr(ip != nil, ip, &server.GeoIP.IP), server.GetUserID())
 	if err != nil {
 		return err
 	}

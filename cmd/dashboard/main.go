@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -24,15 +23,16 @@ import (
 	"github.com/nezhahq/nezha/cmd/dashboard/controller/waf"
 	"github.com/nezhahq/nezha/cmd/dashboard/rpc"
 	"github.com/nezhahq/nezha/model"
+	"github.com/nezhahq/nezha/pkg/idcodec"
 	"github.com/nezhahq/nezha/pkg/utils"
 	"github.com/nezhahq/nezha/proto"
 	"github.com/nezhahq/nezha/service/singleton"
 )
 
 type DashboardCliParam struct {
-	Version          bool   // 当前版本号
-	ConfigFile       string // 配置文件路径
-	DatabaseLocation string // Sqlite3 数据库文件路径
+	Version          bool
+	ConfigFile       string
+	DatabaseLocation string
 }
 
 var (
@@ -42,11 +42,16 @@ var (
 )
 
 func initSystem(bus chan<- *model.Service) error {
-	// 初始化管理员账户
 	var usersCount int64
 	if err := singleton.DB.Model(&model.User{}).Count(&usersCount).Error; err != nil {
 		return err
 	}
+	// Backward-compatible bootstrap state: existing installers and recovery
+	// procedures expect the first login on an empty database to be admin/admin.
+	// This is not a permanent credential or an authentication-bypass fallback;
+	// operators must complete initialization and change it before exposing the
+	// Dashboard. Replacing it requires a coordinated installer/migration flow so
+	// existing unattended installations are not locked out.
 	if usersCount == 0 {
 		hash, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 		if err != nil {
@@ -61,17 +66,14 @@ func initSystem(bus chan<- *model.Service) error {
 		}
 	}
 
-	// 启动 singleton 包下的所有服务
 	if err := singleton.LoadSingleton(bus); err != nil {
 		return err
 	}
 
-	// 每天的3:30 对流量记录进行清理
 	if _, err := singleton.CronShared.AddFunc("0 30 3 * * *", singleton.CleanMonitorHistory); err != nil {
 		return err
 	}
 
-	// 每小时对流量记录进行打点
 	if _, err := singleton.CronShared.AddFunc("0 0 * * * *", func() { singleton.RecordTransferHourlyUsage() }); err != nil {
 		return err
 	}
@@ -84,7 +86,15 @@ func initSystem(bus chan<- *model.Service) error {
 		return err
 	}
 
+	if err := singleton.StartJWTSessionGC(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func initIDCodec() error {
+	return idcodec.Init([]byte(singleton.Conf.JWTSecretKey))
 }
 
 // @title           Nezha Monitoring API
@@ -105,6 +115,13 @@ func initSystem(bus chan<- *model.Service) error {
 // @securityDefinitions.apikey  BearerAuth
 // @in header
 // @name Authorization
+// @description JWT session token. Browser/UI flow. Format: `Bearer <jwt>` or cookie `nz-jwt`.
+
+// @securityDefinitions.apikey  APITokenAuth
+// @in header
+// @name Authorization
+// @description Personal Access Token (PAT). Programmatic/CI/LLM flow. Format: `Bearer nzp_<secret>`.
+// @description Each endpoint enforces a specific scope; see the `controller` package godoc for the authoritative scope table.
 
 // @externalDocs.description  OpenAPI
 // @externalDocs.url          https://swagger.io/resources/open-api/
@@ -122,6 +139,7 @@ func main() {
 	serviceSentinelDispatchBus := make(chan *model.Service)
 	if err := utils.FirstError(singleton.InitFrontendTemplates,
 		func() error { return singleton.InitConfigFromPath(dashboardCliParam.ConfigFile) },
+		initIDCodec,
 		singleton.InitTimezoneAndCache,
 		func() error {
 			if singleton.Conf.Memory.GoMemLimitMB > 0 {
@@ -136,13 +154,24 @@ func main() {
 		log.Fatal(err)
 	}
 
-	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", singleton.Conf.ListenHost, singleton.Conf.ListenPort))
+	l, err := openDashboardListener("tcp", dashboardListenerAddress(singleton.Conf.ListenHost, singleton.Conf.ListenPort), dashboardHTTPListener)
 	if err != nil {
 		log.Fatal(err)
+	}
+	receiptListener, err := openReceiptGateListener()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if receiptListener != nil {
+		defer receiptListener.Close()
+		rpc.SetReceiptGateListener(receiptListener)
 	}
 
 	singleton.CleanMonitorHistory()
 	rpc.DispatchKeepalive()
+	rpc.SetMCPKillSwitchObserver(func() bool {
+		return singleton.Conf == nil || !singleton.Conf.MCPEnabled()
+	})
 	go rpc.DispatchTask(serviceSentinelDispatchBus)
 	go singleton.AlertSentinelStart()
 
@@ -178,7 +207,7 @@ func main() {
 		log.Printf("NEZHA>> Dashboard::START ON %s:%d", singleton.Conf.ListenHost, singleton.Conf.ListenPort)
 		if singleton.Conf.HTTPS.ListenPort != 0 {
 			go func() {
-				errChan <- muxServerHTTPS.ListenAndServeTLS(singleton.Conf.HTTPS.TLSCertPath, singleton.Conf.HTTPS.TLSKeyPath)
+				errChan <- serveDashboardHTTPS(muxServerHTTPS, singleton.Conf.HTTPS.TLSCertPath, singleton.Conf.HTTPS.TLSKeyPath)
 			}()
 			log.Printf("NEZHA>> Dashboard::START ON %s:%d", singleton.Conf.ListenHost, singleton.Conf.HTTPS.ListenPort)
 		}
@@ -188,6 +217,7 @@ func main() {
 		return <-errChan
 	}, func(c context.Context) error {
 		log.Println("NEZHA>> Graceful::START")
+		rpc.CloseReceiptGate()
 		singleton.RecordTransferHourlyUsage()
 		singleton.CloseTSDB()
 		log.Println("NEZHA>> Graceful::END")

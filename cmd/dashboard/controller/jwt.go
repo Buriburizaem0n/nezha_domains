@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"time"
 
@@ -12,30 +14,87 @@ import (
 
 	"github.com/nezhahq/nezha/cmd/dashboard/controller/waf"
 	"github.com/nezhahq/nezha/model"
+	"github.com/nezhahq/nezha/pkg/idcodec"
 	"github.com/nezhahq/nezha/pkg/utils"
 	"github.com/nezhahq/nezha/service/singleton"
 )
 
+const (
+	jwtClaimUserID = "uid"
+	jwtClaimKeyID  = "keyId"
+	jwtKeyIDBytes  = 32
+)
+
+func uaHash(c *gin.Context) string {
+	sum := sha256.Sum256([]byte(c.Request.UserAgent()))
+	return hex.EncodeToString(sum[:])
+}
+
+func issueJWTSession(c *gin.Context, user *model.User, jwtTimeoutHours int) (map[string]interface{}, error) {
+	keyID, err := utils.GenerateRandomString(jwtKeyIDBytes)
+	if err != nil {
+		return nil, err
+	}
+	// encodedUID is reversible Sqids obfuscation keyed by JWTSecretKey, NOT
+	// a one-way hash. It exists to defeat enumeration on the wire, not to
+	// keep the uid confidential — see L2 note in idcodec docs.
+	encodedUID, err := idcodec.Encode(user.ID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	sess := model.JWTSession{
+		KeyID:        keyID,
+		UserID:       user.ID,
+		IP:           c.GetString(model.CtxKeyRealIPStr),
+		UAHash:       uaHash(c),
+		TokenVersion: user.TokenVersion,
+		ExpiresAt:    now.Add(time.Hour * time.Duration(jwtTimeoutHours)),
+		CreatedAt:    now,
+		LastUsedAt:   now,
+	}
+	if err := singleton.DB.Create(&sess).Error; err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		jwtClaimUserID: encodedUID,
+		jwtClaimKeyID:  keyID,
+	}, nil
+}
+
 func initParams() *jwt.GinJWTMiddleware {
 	return &jwt.GinJWTMiddleware{
-		Realm:       singleton.Conf.SiteName,
-		Key:         []byte(singleton.Conf.JWTSecretKey),
-		CookieName:  "nz-jwt",
-		SendCookie:  true,
-		Timeout:     time.Hour * time.Duration(singleton.Conf.JWTTimeout),
-		MaxRefresh:  time.Hour * time.Duration(singleton.Conf.JWTTimeout),
-		IdentityKey: model.CtxKeyAuthorizedUser,
-		PayloadFunc: payloadFunc(),
+		Realm:      singleton.Conf.SiteName,
+		Key:        []byte(singleton.Conf.JWTSecretKey),
+		CookieName: "nz-jwt",
+		SendCookie: true,
+		// Pin the signing algorithm so a future library default change (or an
+		// `alg: none` confusion attempt) cannot weaken token validation.
+		SigningAlgorithm: "HS256",
+		// Lax keeps OAuth callback redirects (top-level GET navigations from
+		// the provider domain) working while blocking cross-site POST CSRF.
+		// HttpOnly/Secure are intentionally left default: the frontend reads
+		// `!!document.cookie` for login-state display and many deployments
+		// terminate TLS at a proxy upstream — both warrant a separate change.
+		CookieSameSite: http.SameSiteLaxMode,
+		Timeout:        time.Hour * time.Duration(singleton.Conf.JWTTimeout),
+		MaxRefresh:     time.Hour * time.Duration(singleton.Conf.JWTTimeout),
+		IdentityKey:    model.CtxKeyAuthorizedUser,
+		PayloadFunc:    payloadFunc(),
 
 		IdentityHandler: identityHandler(),
 		Authenticator:   authenticator(),
 		Authorizator:    authorizator(),
 		Unauthorized:    unauthorized(),
-		TokenLookup:     "header: Authorization, query: token, cookie: nz-jwt",
-		TokenHeadName:   "Bearer",
-		TimeFunc:        time.Now,
+		// query: token still accepted because the WebSocket browser API
+		// cannot set Authorization headers; removing it would break the
+		// /ws/* routes until the frontend migrates to cookie auth.
+		TokenLookup:   "header: Authorization, query: token, cookie: nz-jwt",
+		TokenHeadName: "Bearer",
+		TimeFunc:      time.Now,
 
 		LoginResponse: func(c *gin.Context, code int, token string, expire time.Time) {
+			setCSRFCookie(c)
 			c.JSON(http.StatusOK, model.CommonResponse[model.LoginResponse]{
 				Success: true,
 				Data: model.LoginResponse{
@@ -61,28 +120,56 @@ func identityHandler() func(c *gin.Context) any {
 	return func(c *gin.Context) any {
 		claims := jwt.ExtractClaims(c)
 
-		userId, ok := claims["user_id"].(string)
-		if !ok {
+		keyID, ok := claims[jwtClaimKeyID].(string)
+		if !ok || keyID == "" {
+			return nil
+		}
+		encodedUID, ok := claims[jwtClaimUserID].(string)
+		if !ok || encodedUID == "" {
+			return nil
+		}
+		claimUID, err := idcodec.Decode(encodedUID)
+		if err != nil {
+			realIP := c.GetString(model.CtxKeyRealIPStr)
+			model.BlockIP(singleton.DB, realIP, model.WAFBlockReasonTypeBruteForceToken, model.BlockIDToken)
 			return nil
 		}
 
-		tokenIP, ok := claims["ip"].(string)
-		if !ok {
+		var sess model.JWTSession
+		if err := singleton.DB.First(&sess, "key_id = ?", keyID).Error; err != nil {
 			return nil
 		}
-
+		if sess.RevokedAt != nil {
+			return nil
+		}
+		now := time.Now()
+		if now.After(sess.ExpiresAt) {
+			return nil
+		}
+		if claimUID != sess.UserID {
+			realIP := c.GetString(model.CtxKeyRealIPStr)
+			model.BlockIP(singleton.DB, realIP, model.WAFBlockReasonTypeBruteForceToken, model.BlockIDToken)
+			return nil
+		}
 		currentIP := c.GetString(model.CtxKeyRealIPStr)
-
-		if tokenIP != currentIP {
-			// IP地址不匹配，token无效
+		if sess.IP != currentIP {
 			c.Set(model.CtxKeyIsIPMismatch, true)
 			return nil
 		}
 
 		var user model.User
-		if err := singleton.DB.First(&user, userId).Error; err != nil {
+		if err := singleton.DB.First(&user, sess.UserID).Error; err != nil {
 			return nil
 		}
+		if user.TokenVersion != sess.TokenVersion {
+			return nil
+		}
+
+		_ = singleton.DB.Model(&model.JWTSession{}).
+			Where("key_id = ?", keyID).
+			Update("last_used_at", now).Error
+
+		c.Set(jwtClaimKeyID, keyID)
 		return &user
 	}
 }
@@ -106,7 +193,7 @@ func authenticator() func(c *gin.Context) (any, error) {
 		var user model.User
 		realip := c.GetString(model.CtxKeyRealIPStr)
 
-		if err := singleton.DB.Select("id", "password", "reject_password").Where("username = ?", loginVals.Username).First(&user).Error; err != nil {
+		if err := singleton.DB.Select("id", "password", "reject_password", "token_version").Where("username = ?", loginVals.Username).First(&user).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
 				model.BlockIP(singleton.DB, realip, model.WAFBlockReasonTypeLoginFail, model.BlockIDUnknownUser)
 			}
@@ -126,11 +213,7 @@ func authenticator() func(c *gin.Context) (any, error) {
 		model.UnblockIP(singleton.DB, realip, model.BlockIDUnknownUser)
 		model.UnblockIP(singleton.DB, realip, int64(user.ID))
 
-		// 返回用户ID和IP地址的组合，用于在payloadFunc中设置JWT claims
-		return map[string]interface{}{
-			"user_id": utils.Itoa(user.ID),
-			"ip":      realip,
-		}, nil
+		return issueJWTSession(c, &user, singleton.Conf.JWTTimeout)
 	}
 }
 
@@ -158,8 +241,17 @@ func unauthorized() func(c *gin.Context, code int, message string) {
 // @Tags auth required
 // @Produce json
 // @Success 200 {object} model.CommonResponse[model.LoginResponse]
-// @Router /refresh-token [get]
+// @Router /refresh-token [post]
 func refreshResponse(c *gin.Context, code int, token string, expire time.Time) {
+	if keyID := c.GetString(jwtClaimKeyID); keyID != "" {
+		_ = singleton.DB.Model(&model.JWTSession{}).
+			Where("key_id = ?", keyID).
+			Updates(map[string]interface{}{
+				"expires_at":   expire,
+				"last_used_at": time.Now(),
+			}).Error
+	}
+	setCSRFCookie(c)
 	c.JSON(http.StatusOK, model.CommonResponse[model.LoginResponse]{
 		Success: true,
 		Data: model.LoginResponse{

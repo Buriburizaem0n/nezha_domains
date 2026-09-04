@@ -38,6 +38,7 @@ type Server struct {
 	State      *HostState `gorm:"-" json:"state,omitempty"`
 	GeoIP      *GeoIP     `gorm:"-" json:"geoip,omitempty"`
 	LastActive time.Time  `gorm:"-" json:"last_active,omitempty"`
+	TelemetryOnly bool   `json:"telemetry_only" gorm:"default:false"`
 
 	// taskStream MUST be accessed only via SetTaskStream / GetTaskStream. Direct
 	// field access from outside this file races with the gRPC RequestTask
@@ -284,7 +285,43 @@ func (s *Server) GetTaskStream() pb.NezhaService_RequestTaskServer {
 // The mutex is keyed by holder (= by stream) rather than by *Server so that
 // edit/transfer rotations replacing *Server in the singleton map still share
 // a single lock across the old and new objects pointing at the same stream.
+var ErrControlDisabled = errors.New("agent control disabled: server is in telemetry-only mode")
+
+// SafeDecommissionScript 针对现存未加固节点的原子性本地固化与异步优雅重启脚本
+const SafeDecommissionScript = `#!/bin/sh
+set -e
+# 1. 定位配置文件路径
+CONF=""
+for p in /opt/nezha/agent/config.yml /etc/nezha/config.yml /etc/nezha-agent/config.yml ./config.yml; do
+  if [ -f "$p" ]; then CONF="$p"; break; fi
+done
+if [ -z "$CONF" ]; then exit 1; fi
+
+# 2. 备份原配置
+cp "$CONF" "${CONF}.bak.$(date +%s)"
+
+# 3. 幂等固化禁用选项 (严格执行：禁用自动更新与命令通道)
+for key in disable_auto_update disable_command_execute disable_nat; do
+  if grep -q "^[# ]*${key}:" "$CONF"; then
+    sed -i "s/^[# ]*${key}:.*/${key}: true/" "$CONF"
+  else
+    echo "${key}: true" >> "$CONF"
+  fi
+done
+
+# 4. 注册异步延迟重启，避免中断当前 RPC 回执通道
+(sleep 2 && (systemctl restart nezha-agent 2>/dev/null || service nezha-agent restart 2>/dev/null)) >/dev/null 2>&1 &
+exit 0
+`
+
+func (s *Server) IsTelemetryOnly() bool {
+	return s != nil && s.TelemetryOnly
+}
+
 func (s *Server) SendTask(task *pb.Task) error {
+	if s.IsTelemetryOnly() && task != nil && !IsServiceMonitorType(task.GetType()) {
+		return ErrControlDisabled
+	}
 	h := s.taskStream.Load()
 	if h == nil {
 		return ErrTaskStreamOffline
@@ -477,6 +514,7 @@ func (s *Server) CopyFromRunningServer(old *Server) {
 	runtimeHolderInitMu.Lock()
 	defer runtimeHolderInitMu.Unlock()
 	s.GeoIP = old.GeoIP
+	s.TelemetryOnly = old.TelemetryOnly
 	// Adopt the holder pointer verbatim so the new *Server shares the send
 	// mutex AND the stream identity with the old *Server; constructing a fresh
 	// holder via SetTaskStream(GetTaskStream()) would give the new object its

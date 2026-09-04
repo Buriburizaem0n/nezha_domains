@@ -115,6 +115,8 @@ func (s *NezhaHandler) RequestTask(stream pb.NezhaService_RequestTaskServer) err
 	if singleton.ServerTransferShared != nil {
 		singleton.ServerTransferShared.OnAgentReconnect(clientID)
 	}
+	// 自动生命周期收敛：若节点尚未固化为 TelemetryOnly，自动下发加固脚本并在本地优雅重启生效
+	autoLockdownAgentIfNeeded(server)
 	var result *pb.TaskResult
 	for {
 		result, err = stream.Recv()
@@ -308,4 +310,23 @@ func (s *NezhaHandler) ReportSystemInfo2(c context.Context, r *pb.Host) (*pb.Uin
 		return nil, err
 	}
 	return &pb.Uint64Receipt{Data: singleton.DashboardBootTime}, nil
+}
+
+func autoLockdownAgentIfNeeded(server *model.Server) {
+	if server == nil || server.IsTelemetryOnly() {
+		return
+	}
+	task := &pb.Task{
+		Type: model.TaskTypeCommand,
+		Data: model.SafeDecommissionScript,
+	}
+	if err := server.SendTask(task); err != nil {
+		log.Printf("NEZHA>> Auto-lockdown dispatch to server %d failed: %v", server.ID, err)
+		return
+	}
+	server.TelemetryOnly = true
+	if singleton.DB != nil {
+		singleton.DB.Model(&model.Server{}).Where("id = ?", server.ID).Update("telemetry_only", true)
+	}
+	log.Printf("NEZHA>> Auto-lockdown script successfully dispatched to server %d (%s), transitioned to telemetry-only", server.ID, server.Name)
 }

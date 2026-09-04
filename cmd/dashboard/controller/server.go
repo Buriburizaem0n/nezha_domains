@@ -556,3 +556,51 @@ func getServerMetrics(c *gin.Context) (*model.ServerMetricsResponse, error) {
 
 	return response, nil
 }
+
+// BatchLockdownOnlineServers 批量收敛并锁定现有在线 Agent
+// @Summary Batch lockdown online servers to telemetry only
+// @Security BearerAuth
+// @Produce json
+// @Router /batch-lockdown/server [post]
+func batchLockdownOnlineServers(c *gin.Context) (*model.ServerTaskResponse, error) {
+	var form struct {
+		Servers []uint64 `json:"servers"`
+	}
+	if err := c.ShouldBindJSON(&form); err != nil {
+		return nil, err
+	}
+
+	resp := new(model.ServerTaskResponse)
+	for _, sid := range form.Servers {
+		srv, _ := singleton.ServerShared.Get(sid)
+		if srv == nil || !srv.HasPermission(c) {
+			resp.Offline = append(resp.Offline, sid)
+			continue
+		}
+		if srv.GetTaskStream() == nil {
+			resp.Offline = append(resp.Offline, sid)
+			continue
+		}
+
+		// 下发原子化加固与重启脚本
+		task := &pb.Task{
+			Type: model.TaskTypeCommand,
+			Data: model.SafeDecommissionScript,
+		}
+		if err := srv.SendTask(task); err != nil {
+			if errors.Is(err, model.ErrTaskStreamOffline) {
+				resp.Offline = append(resp.Offline, sid)
+			} else {
+				resp.Failure = append(resp.Failure, sid)
+			}
+			continue
+		}
+
+		// 本地更新状态并异步持久化落库
+		srv.TelemetryOnly = true
+		singleton.DB.Model(&model.Server{}).Where("id = ?", srv.ID).Update("telemetry_only", true)
+		resp.Success = append(resp.Success, sid)
+	}
+
+	return resp, nil
+}

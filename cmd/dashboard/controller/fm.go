@@ -44,6 +44,10 @@ func createFM(c *gin.Context) (*model.CreateFMResponse, error) {
 		return nil, singleton.Localizer.ErrorT("permission denied")
 	}
 
+	if server.IsTelemetryOnly() {
+		return nil, singleton.Localizer.ErrorT("file manager is disabled: server is in telemetry-only mode")
+	}
+
 	streamId, err := uuid.GenerateUUID()
 	if err != nil {
 		return nil, err

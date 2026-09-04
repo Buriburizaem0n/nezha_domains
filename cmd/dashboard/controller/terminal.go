@@ -47,6 +47,10 @@ func createTerminal(c *gin.Context) (*model.CreateTerminalResponse, error) {
 		return nil, singleton.Localizer.ErrorT("permission denied")
 	}
 
+	if server.IsTelemetryOnly() {
+		return nil, singleton.Localizer.ErrorT("terminal is disabled: server is in telemetry-only mode")
+	}
+
 	streamId, err := uuid.GenerateUUID()
 	if err != nil {
 		return nil, err

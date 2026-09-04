@@ -7,12 +7,16 @@ import (
 
 	"github.com/nezhahq/nezha/pkg/grpcx"
 	pb "github.com/nezhahq/nezha/proto"
+	"github.com/nezhahq/nezha/service/singleton"
 )
 
 func (s *NezhaHandler) IOStream(stream pb.NezhaService_IOStreamServer) error {
 	clientID, err := s.Auth.Check(stream.Context())
 	if err != nil {
 		return err
+	}
+	if srv, ok := singleton.ServerShared.Get(clientID); ok && srv != nil && srv.IsTelemetryOnly() {
+		return fmt.Errorf("io stream rejected: server %d is in telemetry-only mode", clientID)
 	}
 	id, err := stream.Recv()
 	if err != nil {

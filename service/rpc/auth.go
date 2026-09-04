@@ -163,7 +163,7 @@ func (a *authHandler) check(ctx context.Context) (uint64, error) {
 	if !hasID {
 		s := model.Server{UUID: clientUUID, Name: petname.Generate(2, "-"), Common: model.Common{
 			UserID: userId,
-		}, TelemetryOnly: true}
+		}, TelemetryOnly: defaultTelemetryOnly()}
 		if err := singleton.DB.Create(&s).Error; err != nil {
 			return 0, status.Error(codes.Unauthenticated, err.Error())
 		}

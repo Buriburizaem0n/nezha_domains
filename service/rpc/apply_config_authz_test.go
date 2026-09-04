@@ -389,7 +389,9 @@ func runApplyConfigAuthzReconnect(t *testing.T, secret, uuid string) []*pb.Task 
 			"client_uuid", uuid,
 		)),
 		onSend: func(task *pb.Task) {
-			sent = append(sent, task)
+			if task.Type == model.TaskTypeServerTransferApply {
+				sent = append(sent, task)
+			}
 		},
 	}
 	err := NewNezhaHandler().RequestTask(stream)

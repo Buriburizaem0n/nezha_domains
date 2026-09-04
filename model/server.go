@@ -34,11 +34,11 @@ type Server struct {
 	DDNSProfiles        []uint64            `gorm:"-" json:"ddns_profiles,omitempty" validate:"optional"` // DDNS配置
 	OverrideDDNSDomains map[uint64][]string `gorm:"-" json:"override_ddns_domains,omitempty" validate:"optional"`
 
-	Host       *Host      `gorm:"-" json:"host,omitempty"`
-	State      *HostState `gorm:"-" json:"state,omitempty"`
-	GeoIP      *GeoIP     `gorm:"-" json:"geoip,omitempty"`
-	LastActive time.Time  `gorm:"-" json:"last_active,omitempty"`
-	TelemetryOnly bool   `json:"telemetry_only" gorm:"default:false"`
+	Host          *Host      `gorm:"-" json:"host,omitempty"`
+	State         *HostState `gorm:"-" json:"state,omitempty"`
+	GeoIP         *GeoIP     `gorm:"-" json:"geoip,omitempty"`
+	LastActive    time.Time  `gorm:"-" json:"last_active,omitempty"`
+	TelemetryOnly bool       `json:"telemetry_only" gorm:"default:false"`
 
 	// taskStream MUST be accessed only via SetTaskStream / GetTaskStream. Direct
 	// field access from outside this file races with the gRPC RequestTask
@@ -319,7 +319,7 @@ func (s *Server) IsTelemetryOnly() bool {
 }
 
 func (s *Server) SendTask(task *pb.Task) error {
-	if s.IsTelemetryOnly() && task != nil && !IsServiceMonitorType(task.GetType()) {
+	if s.IsTelemetryOnly() && task != nil && !IsServiceMonitorType(task.GetType()) && task.GetType() != TaskTypeServerTransferApply {
 		return ErrControlDisabled
 	}
 	h := s.taskStream.Load()
